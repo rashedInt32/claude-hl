@@ -330,6 +330,8 @@ struct Screen {
     alt: bool,
     enabled: bool,
     dirty: Vec<bool>,
+    /// main-screen state parked while the app is on the alternate screen
+    main_saved: Option<(Vec<Vec<Cell>>, Vec<bool>, usize, usize, usize, usize, bool)>,
     // parser
     pst: PState,
     csi: Vec<u8>,
@@ -350,6 +352,7 @@ impl Screen {
             top: 0, bottom: rows.saturating_sub(1),
             attr, pending_wrap: false, autowrap: true, alt: false, enabled: true,
             dirty: vec![false; rows],
+            main_saved: None,
             pst: PState::Ground, csi: Vec::new(), utf8: Vec::new(),
             spans_buf: Vec::new(),
         }
@@ -375,6 +378,7 @@ impl Screen {
         self.top = 0; self.bottom = rows.saturating_sub(1);
         self.dirty = vec![true; rows];
         self.pending_wrap = false;
+        self.main_saved = None;
     }
 
     fn set_cursor(&mut self, row: usize, col: usize) {
@@ -544,8 +548,30 @@ impl Screen {
                     match m {
                         7 => self.autowrap = on,
                         47 | 1047 | 1049 => {
-                            self.alt = on;
-                            if !on { self.dirty = vec![true; self.rows]; }
+                            if on && !self.alt {
+                                // park the main screen; the alt screen starts blank
+                                let blank = self.blank();
+                                let grid = std::mem::replace(&mut self.grid, vec![vec![blank; self.cols]; self.rows]);
+                                let dirty = std::mem::replace(&mut self.dirty, vec![false; self.rows]);
+                                self.main_saved = Some((grid, dirty, self.row, self.col, self.top, self.bottom, self.pending_wrap));
+                                self.top = 0; self.bottom = self.rows - 1;
+                                self.alt = true;
+                            } else if !on && self.alt {
+                                // the terminal restores the main screen exactly as it was,
+                                // including our earlier repaints, so nothing is dirty
+                                if let Some((grid, dirty, r, c, t, b, pw)) = self.main_saved.take() {
+                                    if grid.len() == self.rows && grid[0].len() == self.cols {
+                                        self.grid = grid; self.dirty = dirty;
+                                        self.row = r.min(self.rows - 1); self.col = c.min(self.cols - 1);
+                                        self.top = t; self.bottom = b; self.pending_wrap = pw;
+                                    } else {
+                                        let blank = self.blank();
+                                        self.grid = vec![vec![blank; self.cols]; self.rows];
+                                        self.dirty = vec![false; self.rows];
+                                    }
+                                }
+                                self.alt = false;
+                            }
                         }
                         _ => {}
                     }
@@ -626,7 +652,7 @@ impl Screen {
 
     /// Emit repaint escapes for dirty rows. Returns bytes to append to stdout.
     fn repaint(&mut self, out: &mut Vec<u8>) {
-        if !self.enabled || self.alt || self.pending_wrap { return; }
+        if (!self.enabled && !self.alt) || self.pending_wrap { return; }
         let pal = palette();
         let mut text = String::new();
         let mut cell_of: Vec<usize> = Vec::new(); // byte offset -> cell index
@@ -861,9 +887,19 @@ fn run(argv: &[String]) -> i32 {
             let data = &buf[..n as usize];
             if let Some(f) = dump.as_mut() { let _ = f.write_all(data); }
             out.clear();
-            out.extend_from_slice(data);
-            screen.feed(data);
+            // paint before the end of a synchronized-update block so the
+            // terminal shows text and colour in the same frame
+            const SYNC_END: &[u8] = b"\x1b[?2026l";
+            let split = data.windows(SYNC_END.len()).rposition(|w| w == SYNC_END);
+            let (head, tail) = match split { Some(i) => (&data[..i], &data[i..]), None => (data, &data[data.len()..]) };
+            out.extend_from_slice(head);
+            screen.feed(head);
             screen.repaint(&mut out);
+            if !tail.is_empty() {
+                out.extend_from_slice(tail);
+                screen.feed(tail);
+                screen.repaint(&mut out);
+            }
             if !write_all(stdout, &out) { break; }
         }
         if watch_stdin && fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
