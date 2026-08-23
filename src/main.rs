@@ -904,7 +904,7 @@ fn run(argv: &[String]) -> i32 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
             break;
         }
-        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
             let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n <= 0 { break; }
             let data = &buf[..n as usize];
@@ -925,11 +925,22 @@ fn run(argv: &[String]) -> i32 {
             }
             if !write_all(stdout, &out) { break; }
         }
-        if watch_stdin && fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-            let n = unsafe { libc::read(stdin, buf.as_mut_ptr() as *mut _, buf.len()) };
+        // macOS poll() reports POLLNVAL for /dev/null; treat it as EOF
+        let stdin_ev = libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+        if watch_stdin && fds[1].revents & stdin_ev != 0 {
+            let n = if fds[1].revents & libc::POLLNVAL != 0 { 0 }
+                    else { unsafe { libc::read(stdin, buf.as_mut_ptr() as *mut _, buf.len()) } };
             if n <= 0 {
-                // stdin closed: keep draining the child's output, else it
-                // blocks on the pty write and never exits (macOS).
+                // stdin closed: hand the child an EOF (its VEOF char) and keep
+                // draining its output, else it blocks on the pty write and
+                // never exits (macOS).
+                unsafe {
+                    let mut t: libc::termios = std::mem::zeroed();
+                    if libc::tcgetattr(master, &mut t) == 0 {
+                        let eof = t.c_cc[libc::VEOF];
+                        if eof != 0 && eof != 0xff { write_all(master, &[eof]); }
+                    }
+                }
                 watch_stdin = false;
                 continue;
             }
