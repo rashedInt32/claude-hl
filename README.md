@@ -57,6 +57,26 @@ sees your overrides. claude-hl already knows every cell's colour, so it swaps
 that lavender for something that fits each theme. Set your own pair if you
 disagree with the pick.
 
+## Why not a custom frontend?
+
+There are good ones. [claude-code-rust](https://github.com/srothgan/claude-code-rust)
+is a Ratatui TUI over the Agent SDK with real syntax highlighting on real
+markdown, and [toad](https://github.com/batrachianai/toad) does similar over
+ACP. Editor integrations like CodeCompanion and Sidekick render Claude's
+output inside a buffer where the editor's own highlighter takes over.
+
+All of them replace the Claude CLI. That's the part I didn't want to give up.
+The CLI is where hooks, skills, plugins, MCP servers, permission prompts, plan
+mode, `/resume`, `/plugin`, Remote Control and every new feature land first. A
+frontend has to re-implement each of those or live without it, and it's
+always a release behind.
+
+claude-hl is the other trade. It gives up knowing the markdown (it only sees
+rendered ANSI) in exchange for changing nothing else. Claude Code runs exactly
+as shipped; the wrapper just recolours what's already on screen. If one day
+Claude Code colours inline commands itself, delete the binary and nothing
+else changes.
+
 ## How it works
 
 The child's output passes through byte for byte. Alongside, a small terminal
