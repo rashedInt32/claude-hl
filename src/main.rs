@@ -41,7 +41,7 @@ const THEME_ROSE: Theme = Theme {
 };
 const THEME_CODEX: Theme = Theme {
     cmd: "6fb3ff", sub: "e6e6e6", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
-    remap: &[(STOCK_CODESPAN, "c792ea")],
+    remap: &[(STOCK_CODESPAN, "a99cff")],
 };
 
 /// Colour classes; index 0 = "no override".

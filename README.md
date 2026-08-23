@@ -30,7 +30,7 @@ Foreground remaps: every cell the app drew with an exact truecolor
 foreground is shown in another colour. Claude Code's markdown renderer
 resolves the theme by name and ignores custom-theme overrides for inline
 code, so both themes remap its stock lavender `b1b9f9` by default (codex →
-`c792ea`, rose → `c4a7e7`). `CLAUDE_HL_REMAP` takes comma-separated `from=to`
+`a99cff`, rose → `c4a7e7`). `CLAUDE_HL_REMAP` takes comma-separated `from=to`
 hex pairs that add to or override the defaults; set it empty to disable.
 
 It reads rendered ANSI, not markdown, so it guesses commands with a
