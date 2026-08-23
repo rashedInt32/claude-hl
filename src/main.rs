@@ -40,7 +40,7 @@ const THEME_ROSE: Theme = Theme {
     remap: &[(STOCK_CODESPAN, "c4a7e7")],
 };
 const THEME_CODEX: Theme = Theme {
-    cmd: "6fb3ff", sub: "e6e6e6", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
+    cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
     remap: &[(STOCK_CODESPAN, "a99cff")],
 };
 
