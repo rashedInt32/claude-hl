@@ -16,8 +16,10 @@
 //! Width is never changed, so the TUI layout survives.
 
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 // ---- palette ---------------------------------------------------------------
@@ -721,6 +723,169 @@ impl Screen {
     }
 }
 
+// ---- PTY plumbing ----------------------------------------------------------
+
+static WINCH: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_winch(_: libc::c_int) { WINCH.store(true, Ordering::SeqCst); }
+
+fn winsize(fd: libc::c_int) -> Option<libc::winsize> {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) == 0 { Some(ws) } else { None }
+    }
+}
+
+fn write_all(fd: libc::c_int, mut buf: &[u8]) -> bool {
+    while !buf.is_empty() {
+        let n = unsafe { libc::write(fd, buf.as_ptr() as *const _, buf.len()) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted || e.kind() == std::io::ErrorKind::WouldBlock { continue; }
+            return false;
+        }
+        buf = &buf[n as usize..];
+    }
+    true
+}
+
+/// Ask the real terminal where the cursor is (DSR). Returns (row, col, leftover stdin bytes).
+fn query_cursor(stdin: libc::c_int, stdout: libc::c_int) -> (Option<(usize, usize)>, Vec<u8>) {
+    write_all(stdout, b"\x1b[6n");
+    let mut acc: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 256];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() { break; }
+        let mut fds = [libc::pollfd { fd: stdin, events: libc::POLLIN, revents: 0 }];
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), 1, left.as_millis() as i32) };
+        if r <= 0 { if r < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; } break; }
+        let n = unsafe { libc::read(stdin, buf.as_mut_ptr() as *mut _, buf.len()) };
+        if n <= 0 { break; }
+        acc.extend_from_slice(&buf[..n as usize]);
+        // look for ESC [ row ; col R
+        if let Some(s) = acc.iter().rposition(|&b| b == 0x1b) {
+            let tail = &acc[s..];
+            if tail.len() >= 2 && tail[1] == b'[' {
+                if let Some(e) = tail.iter().position(|&b| b == b'R') {
+                    let body = std::str::from_utf8(&tail[2..e]).unwrap_or("");
+                    let mut it = body.split(';').map(|x| x.parse::<usize>().unwrap_or(1));
+                    let row = it.next().unwrap_or(1).max(1) - 1;
+                    let col = it.next().unwrap_or(1).max(1) - 1;
+                    let mut left = acc[..s].to_vec();
+                    left.extend_from_slice(&tail[e + 1..]);
+                    return (Some((row, col)), left);
+                }
+            }
+        }
+    }
+    (None, acc)
+}
+
+fn run(argv: &[String]) -> i32 {
+    let stdin = libc::STDIN_FILENO;
+    let stdout = libc::STDOUT_FILENO;
+    let isatty = unsafe { libc::isatty(stdin) } == 1;
+    let ws = if isatty { winsize(stdin) } else { None };
+    let (rows, cols) = ws.map_or((24, 80), |w| (w.ws_row.max(1) as usize, w.ws_col.max(1) as usize));
+
+    // raw mode + cursor query before spawning, so the child never sees the DSR reply
+    let mut old: Option<libc::termios> = None;
+    let mut screen = Screen::new(rows, cols);
+    let mut leftover = Vec::new();
+    if isatty {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(stdin, &mut t) == 0 {
+                old = Some(t);
+                let mut raw = t;
+                libc::cfmakeraw(&mut raw);
+                libc::tcsetattr(stdin, libc::TCSAFLUSH, &raw);
+            }
+        }
+        let (pos, rest) = query_cursor(stdin, stdout);
+        match pos {
+            Some((r, c)) => screen.set_cursor(r, c),
+            None => {
+                // unknown cursor position: never guess, just pass through
+                screen.enabled = false;
+                eprintln!("claude-hl: terminal did not answer cursor query; highlighting disabled");
+            }
+        }
+        leftover = rest;
+    }
+
+    let cargs: Vec<CString> = argv.iter().map(|a| CString::new(a.as_str()).unwrap()).collect();
+    let mut master: libc::c_int = 0;
+    let mut wsz = ws.unwrap_or(libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 });
+    let pid = unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), std::ptr::null_mut(), &mut wsz) };
+    if pid < 0 {
+        if let Some(t) = old { unsafe { libc::tcsetattr(stdin, libc::TCSADRAIN, &t); } }
+        eprintln!("claude-hl: forkpty failed: {}", std::io::Error::last_os_error());
+        return 1;
+    }
+    if pid == 0 {
+        let mut ptrs: Vec<*const libc::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        unsafe { libc::execvp(ptrs[0], ptrs.as_ptr()); libc::_exit(127); }
+    }
+    if isatty {
+        unsafe { libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t); }
+    }
+    if !leftover.is_empty() { write_all(master, &leftover); }
+
+    let mut dump = std::env::var("CLAUDE_HL_DUMP").ok().and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+    let mut buf = vec![0u8; 65536];
+    let mut out: Vec<u8> = Vec::with_capacity(131072);
+    let mut watch_stdin = true;
+    loop {
+        if WINCH.swap(false, Ordering::SeqCst) {
+            if let Some(w) = winsize(stdin) {
+                unsafe { libc::ioctl(master, libc::TIOCSWINSZ, &w); libc::kill(pid, libc::SIGWINCH); }
+                screen.resize(w.ws_row.max(1) as usize, w.ws_col.max(1) as usize);
+            }
+        }
+        let mut fds = [
+            libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: if watch_stdin { stdin } else { -1 }, events: libc::POLLIN, revents: 0 },
+        ];
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if r < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+            break;
+        }
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if n <= 0 { break; }
+            let data = &buf[..n as usize];
+            if let Some(f) = dump.as_mut() { let _ = f.write_all(data); }
+            out.clear();
+            out.extend_from_slice(data);
+            screen.feed(data);
+            screen.repaint(&mut out);
+            if !write_all(stdout, &out) { break; }
+        }
+        if watch_stdin && fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            let n = unsafe { libc::read(stdin, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if n <= 0 {
+                // stdin closed: keep draining the child's output, else it
+                // blocks on the pty write and never exits (macOS).
+                watch_stdin = false;
+                continue;
+            }
+            write_all(master, &buf[..n as usize]);
+        }
+    }
+
+    if let Some(t) = old { unsafe { libc::tcsetattr(stdin, libc::TCSADRAIN, &t); } }
+    let mut status: libc::c_int = 0;
+    let w = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if w < 0 { return 0; }
+    if libc::WIFEXITED(status) { return libc::WEXITSTATUS(status); }
+    1
+}
+
 // ---- entry -----------------------------------------------------------------
 
 const SAMPLE: &str = "Ran git diff --stat && git status --short\r\n\
@@ -743,6 +908,8 @@ fn main() {
         let _ = so.write_all(sc.render_inline().as_bytes());
         return;
     }
-    eprintln!("claude-hl: only --selftest is implemented so far");
-    std::process::exit(2);
+    let cmd = std::env::var("CLAUDE_HL_CMD").unwrap_or_else(|_| "claude".to_string());
+    let mut argv = vec![cmd];
+    argv.extend(args);
+    std::process::exit(run(&argv));
 }
