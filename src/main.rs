@@ -24,10 +24,25 @@ use std::sync::OnceLock;
 
 // ---- palette ---------------------------------------------------------------
 
-struct Theme { cmd: &'static str, sub: &'static str, flag: &'static str, string: &'static str, path: &'static str, op: &'static str }
+struct Theme {
+    cmd: &'static str, sub: &'static str, flag: &'static str, string: &'static str, path: &'static str, op: &'static str,
+    /// default foreground remaps (from, to), see `remaps()`
+    remap: &'static [(&'static str, &'static str)],
+}
 
-const THEME_ROSE: Theme = Theme { cmd: "9ccfd8", sub: "c4a7e7", flag: "ebbcba", string: "f6c177", path: "e0def4", op: "9ccfd8" };
-const THEME_CODEX: Theme = Theme { cmd: "6fb3ff", sub: "e6e6e6", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff" };
+/// Claude Code's inline code always uses the stock dark `permission` colour
+/// (the markdown renderer resolves the theme by name, bypassing custom
+/// themes), so both themes lift that lavender a little by default.
+const STOCK_CODESPAN: &str = "b1b9f9";
+
+const THEME_ROSE: Theme = Theme {
+    cmd: "9ccfd8", sub: "c4a7e7", flag: "ebbcba", string: "f6c177", path: "e0def4", op: "9ccfd8",
+    remap: &[(STOCK_CODESPAN, "c4a7e7")],
+};
+const THEME_CODEX: Theme = Theme {
+    cmd: "6fb3ff", sub: "e6e6e6", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
+    remap: &[(STOCK_CODESPAN, "c5cbff")],
+};
 
 /// Colour classes; index 0 = "no override".
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,34 +55,48 @@ fn rgb(h: &str) -> String {
 }
 
 /// SGR strings indexed by Color.
+fn theme() -> &'static Theme {
+    match std::env::var("CLAUDE_HL_THEME").as_deref() {
+        Ok("rose") => &THEME_ROSE,
+        _ => &THEME_CODEX,
+    }
+}
+
 fn palette() -> &'static [String; 7] {
     static P: OnceLock<[String; 7]> = OnceLock::new();
     P.get_or_init(|| {
-        let t = match std::env::var("CLAUDE_HL_THEME").as_deref() {
-            Ok("rose") => THEME_ROSE,
-            _ => THEME_CODEX,
-        };
+        let t = theme();
         [String::new(), rgb(t.cmd), rgb(t.sub), rgb(t.flag), rgb(t.string), rgb(t.path), rgb(t.op)]
     })
 }
 
-/// Foreground remaps, `CLAUDE_HL_REMAP=rrggbb=rrggbb,...`: any cell the app
-/// drew in the first colour is shown in the second. Useful where an app
-/// ignores theme overrides (Claude Code's inline code always uses the stock
-/// `permission` colour). Returns (exact SGR fg params to match, SGR to emit).
+/// Foreground remaps: any cell the app drew in the first colour is shown in
+/// the second. The theme supplies defaults; `CLAUDE_HL_REMAP=rrggbb=rrggbb,...`
+/// adds to or overrides them (`CLAUDE_HL_REMAP=` empty disables all).
+/// Returns (exact SGR fg params to match, SGR to emit).
 fn remaps() -> &'static Vec<(String, String)> {
     static R: OnceLock<Vec<(String, String)>> = OnceLock::new();
     R.get_or_init(|| {
-        let mut v = Vec::new();
-        if let Ok(spec) = std::env::var("CLAUDE_HL_REMAP") {
+        let mut v: Vec<(String, String)> = Vec::new();
+        let fg = |h: &str| {
+            let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
+            format!("38;2;{};{};{}", c(0), c(2), c(4))
+        };
+        let env = std::env::var("CLAUDE_HL_REMAP").ok();
+        if env.is_none() {
+            for (from, to) in theme().remap { v.push((fg(from), rgb(to))); }
+        }
+        if let Some(spec) = env {
+            for (from, to) in theme().remap { v.push((fg(from), rgb(to))); }
             for pair in spec.split(',') {
                 let Some((from, to)) = pair.trim().split_once('=') else { continue };
                 let (from, to) = (from.trim().trim_start_matches('#'), to.trim().trim_start_matches('#'));
                 if from.len() != 6 || to.len() != 6 { continue; }
-                let c = |h: &str, i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
-                v.push((format!("38;2;{};{};{}", c(from, 0), c(from, 2), c(from, 4)), rgb(to)));
-                if v.len() == 200 { break; }
+                let key = fg(from);
+                if let Some(e) = v.iter_mut().find(|(k, _)| *k == key) { e.1 = rgb(to); }
+                else if v.len() < 200 { v.push((key, rgb(to))); }
             }
+            if spec.trim().is_empty() { v.clear(); }
         }
         v
     })
