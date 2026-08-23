@@ -11,7 +11,18 @@ unchanged, so hooks, skills, MCP, permissions and `/rc` all keep working.
 
 ## Install
 
+Needs a Rust toolchain ([rustup.rs](https://rustup.rs)).
+
 ```sh
+cargo install --git https://github.com/rashedInt32/claude-hl
+```
+
+That drops `claude-hl` into `~/.cargo/bin`, which rustup already put on your
+PATH. Or clone and build it yourself:
+
+```sh
+git clone https://github.com/rashedInt32/claude-hl
+cd claude-hl
 cargo build --release
 cp target/release/claude-hl ~/.local/bin/
 ```
