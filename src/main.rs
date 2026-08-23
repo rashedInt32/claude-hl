@@ -372,13 +372,19 @@ impl Screen {
         if rows == self.rows && cols == self.cols { return; }
         let blank = self.blank();
         self.grid = Self::resize_grid(&self.grid, &blank, rows, cols);
+        // the parked main screen must follow the new size too, else leaving
+        // the alt screen later would find nothing to restore
+        if let Some((grid, dirty, r, c, _t, _b, pw)) = self.main_saved.take() {
+            let mut d = dirty; d.resize(rows, false);
+            self.main_saved = Some((Self::resize_grid(&grid, &blank, rows, cols), d,
+                r.min(rows.saturating_sub(1)), c.min(cols.saturating_sub(1)), 0, rows.saturating_sub(1), pw));
+        }
         self.rows = rows; self.cols = cols;
         self.row = self.row.min(rows.saturating_sub(1));
         self.col = self.col.min(cols.saturating_sub(1));
         self.top = 0; self.bottom = rows.saturating_sub(1);
         self.dirty = vec![true; rows];
         self.pending_wrap = false;
-        self.main_saved = None;
     }
 
     fn set_cursor(&mut self, row: usize, col: usize) {
@@ -559,15 +565,20 @@ impl Screen {
                             } else if !on && self.alt {
                                 // the terminal restores the main screen exactly as it was,
                                 // including our earlier repaints, so nothing is dirty
-                                if let Some((grid, dirty, r, c, t, b, pw)) = self.main_saved.take() {
-                                    if grid.len() == self.rows && grid[0].len() == self.cols {
+                                match self.main_saved.take() {
+                                    Some((grid, dirty, r, c, t, b, pw)) => {
                                         self.grid = grid; self.dirty = dirty;
                                         self.row = r.min(self.rows - 1); self.col = c.min(self.cols - 1);
                                         self.top = t; self.bottom = b; self.pending_wrap = pw;
-                                    } else {
+                                    }
+                                    None => {
+                                        // 1049l without a matching 1049h: the main screen
+                                        // content and cursor are unknown; model blank, paint nothing
                                         let blank = self.blank();
                                         self.grid = vec![vec![blank; self.cols]; self.rows];
                                         self.dirty = vec![false; self.rows];
+                                        self.top = 0; self.bottom = self.rows - 1;
+                                        self.enabled = false;
                                     }
                                 }
                                 self.alt = false;
@@ -653,6 +664,10 @@ impl Screen {
     /// Emit repaint escapes for dirty rows. Returns bytes to append to stdout.
     fn repaint(&mut self, out: &mut Vec<u8>) {
         if (!self.enabled && !self.alt) || self.pending_wrap { return; }
+        // a read boundary can fall inside an escape sequence or a multi-byte
+        // char; injecting bytes there would corrupt it. Rows stay dirty and
+        // paint on the next chunk.
+        if self.pst != PState::Ground || !self.utf8.is_empty() { return; }
         let pal = palette();
         let mut text = String::new();
         let mut cell_of: Vec<usize> = Vec::new(); // byte offset -> cell index
@@ -790,20 +805,23 @@ fn query_cursor(stdin: libc::c_int, stdout: libc::c_int) -> (Option<(usize, usiz
         let n = unsafe { libc::read(stdin, buf.as_mut_ptr() as *mut _, buf.len()) };
         if n <= 0 { break; }
         acc.extend_from_slice(&buf[..n as usize]);
-        // look for ESC [ row ; col R
-        if let Some(s) = acc.iter().rposition(|&b| b == 0x1b) {
+        // look for ESC [ row ; col R anywhere in what arrived; other
+        // sequences (keys, focus events) may sit before or after it
+        for s in (0..acc.len()).filter(|&i| acc[i] == 0x1b) {
             let tail = &acc[s..];
-            if tail.len() >= 2 && tail[1] == b'[' {
-                if let Some(e) = tail.iter().position(|&b| b == b'R') {
-                    let body = std::str::from_utf8(&tail[2..e]).unwrap_or("");
-                    let mut it = body.split(';').map(|x| x.parse::<usize>().unwrap_or(1));
-                    let row = it.next().unwrap_or(1).max(1) - 1;
-                    let col = it.next().unwrap_or(1).max(1) - 1;
-                    let mut left = acc[..s].to_vec();
-                    left.extend_from_slice(&tail[e + 1..]);
-                    return (Some((row, col)), left);
-                }
-            }
+            if tail.len() < 2 || tail[1] != b'[' { continue; }
+            let e = match tail[2..].iter().position(|&b| !(b.is_ascii_digit() || b == b';')) {
+                Some(k) => k + 2,
+                None => continue,
+            };
+            if tail[e] != b'R' { continue; }
+            let body = std::str::from_utf8(&tail[2..e]).unwrap_or("");
+            let mut it = body.split(';').map(|x| x.parse::<usize>().unwrap_or(1));
+            let row = it.next().unwrap_or(1).max(1) - 1;
+            let col = it.next().unwrap_or(1).max(1) - 1;
+            let mut left = acc[..s].to_vec();
+            left.extend_from_slice(&tail[e + 1..]);
+            return (Some((row, col)), left);
         }
     }
     (None, acc)
@@ -813,6 +831,7 @@ fn run(argv: &[String]) -> i32 {
     let stdin = libc::STDIN_FILENO;
     let stdout = libc::STDOUT_FILENO;
     let isatty = unsafe { libc::isatty(stdin) } == 1;
+    let out_tty = unsafe { libc::isatty(stdout) } == 1;
     let ws = if isatty { winsize(stdin) } else { None };
     let (rows, cols) = ws.map_or((24, 80), |w| (w.ws_row.max(1) as usize, w.ws_col.max(1) as usize));
 
@@ -820,7 +839,11 @@ fn run(argv: &[String]) -> i32 {
     let mut old: Option<libc::termios> = None;
     let mut screen = Screen::new(rows, cols);
     let mut leftover = Vec::new();
-    if isatty {
+    if !isatty || !out_tty {
+        // no terminal to measure or to draw on: pure passthrough
+        screen.enabled = false;
+    }
+    if isatty && out_tty {
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(stdin, &mut t) == 0 {
