@@ -2,6 +2,8 @@
 
 Syntax colours for shell commands in Claude Code's output. Like Codex does it.
 
+![The same Claude Code session, plain on top and painted by claude-hl below](docs/before-after.png)
+
 Claude Code shows inline commands in one flat colour. `git commit -m "fix" --no-verify`
 is just a string. claude-hl sits between Claude Code and your terminal and paints
 the command blue, the flags pink, the string gold. Claude Code itself runs
@@ -14,7 +16,7 @@ cargo build --release
 cp target/release/claude-hl ~/.local/bin/
 ```
 
-One dependency (`libc`), one 380 KB binary, macOS and Linux.
+One dependency (`libc`), one 380 KB binary. Built and used on macOS; Linux should work but hasn't been tried.
 
 ## Use
 
