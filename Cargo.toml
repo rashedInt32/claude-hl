@@ -1,0 +1,16 @@
+[package]
+name = "claude-hl"
+version = "0.2.0"
+edition = "2021"
+description = "Run a TUI (default: claude) inside a PTY and paint shell commands in its output, Codex-style."
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
