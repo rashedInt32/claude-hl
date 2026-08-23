@@ -10,6 +10,7 @@ claude-hl [args passed to claude...]
 CLAUDE_HL_CMD=codex claude-hl        # wrap something else
 CLAUDE_HL_THEME=rose claude-hl       # rose-pine palette (default: codex)
 claude-hl --selftest                 # print sample highlighted text
+CLAUDE_HL_REMAP=b1b9f9=c5cbff claude-hl   # recolour any exact foreground the app draws
 ```
 
 How it works: the child's raw output passes through untouched while a small
@@ -24,6 +25,12 @@ the stream is passed through unchanged. Width is never changed.
 Token classes: command, subcommand, flag, quoted string, operator
 (`&& || | ; > >> < 2>&1`), path/number. `CLAUDE_HL_DUMP=/path` appends the
 raw PTY stream to a file for debugging.
+
+`CLAUDE_HL_REMAP` takes comma-separated `from=to` hex pairs. Every cell the
+app drew with exactly `from` as its truecolor foreground is shown in `to`.
+Claude Code's markdown renderer resolves the theme by name and ignores
+custom-theme overrides for inline code, so this is the only way to restyle
+that colour (stock dark value: `b1b9f9`).
 
 It reads rendered ANSI, not markdown, so it guesses commands with a
 vocabulary and will occasionally paint prose. That is inherent.

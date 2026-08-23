@@ -51,6 +51,33 @@ fn palette() -> &'static [String; 7] {
     })
 }
 
+/// Foreground remaps, `CLAUDE_HL_REMAP=rrggbb=rrggbb,...`: any cell the app
+/// drew in the first colour is shown in the second. Useful where an app
+/// ignores theme overrides (Claude Code's inline code always uses the stock
+/// `permission` colour). Returns (exact SGR fg params to match, SGR to emit).
+fn remaps() -> &'static Vec<(String, String)> {
+    static R: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    R.get_or_init(|| {
+        let mut v = Vec::new();
+        if let Ok(spec) = std::env::var("CLAUDE_HL_REMAP") {
+            for pair in spec.split(',') {
+                let Some((from, to)) = pair.trim().split_once('=') else { continue };
+                let (from, to) = (from.trim().trim_start_matches('#'), to.trim().trim_start_matches('#'));
+                if from.len() != 6 || to.len() != 6 { continue; }
+                let c = |h: &str, i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
+                v.push((format!("38;2;{};{};{}", c(from, 0), c(from, 2), c(from, 4)), rgb(to)));
+                if v.len() == 200 { break; }
+            }
+        }
+        v
+    })
+}
+
+/// SGR string for a colour code.
+fn code_sgr(code: u8) -> &'static str {
+    if code < 16 { &palette()[code as usize] } else { &remaps()[code as usize - 16].1 }
+}
+
 // ---- vocabulary ------------------------------------------------------------
 
 const COMMANDS: &str = "git gh npm npx pnpm yarn bun bunx node deno python python3 pip pip3 uv go cargo \
@@ -301,7 +328,7 @@ impl Attr {
 // ---- screen model ----------------------------------------------------------
 
 #[derive(Clone)]
-struct Cell { ch: char, zw: Option<Box<str>>, attr: Rc<Attr>, cont: bool, shown: Color }
+struct Cell { ch: char, zw: Option<Box<str>>, attr: Rc<Attr>, cont: bool, shown: u8 }
 
 fn char_width(c: char) -> usize {
     let u = c as u32;
@@ -370,7 +397,7 @@ struct Screen {
 impl Screen {
     fn new(rows: usize, cols: usize) -> Self {
         let attr = Rc::new(Attr::default());
-        let blank = Cell { ch: ' ', zw: None, attr: attr.clone(), cont: false, shown: Color::None };
+        let blank = Cell { ch: ' ', zw: None, attr: attr.clone(), cont: false, shown: 0 };
         Screen {
             rows, cols,
             grid: vec![vec![blank; cols]; rows],
@@ -385,7 +412,7 @@ impl Screen {
         }
     }
 
-    fn blank(&self) -> Cell { Cell { ch: ' ', zw: None, attr: self.attr.clone(), cont: false, shown: Color::None } }
+    fn blank(&self) -> Cell { Cell { ch: ' ', zw: None, attr: self.attr.clone(), cont: false, shown: 0 } }
 
     fn resize_grid(old: &[Vec<Cell>], blank: &Cell, rows: usize, cols: usize) -> Vec<Vec<Cell>> {
         let mut grid = vec![vec![blank.clone(); cols]; rows];
@@ -461,13 +488,13 @@ impl Screen {
                 let mut s = cell.zw.as_deref().unwrap_or("").to_string();
                 s.push(c);
                 cell.zw = Some(s.into_boxed_str());
-                cell.shown = Color::None;
+                cell.shown = 0;
                 let widen = c == '\u{FE0F}' && vs16_widens(cell.ch) && !self.pending_wrap
                     && col + 1 < self.cols && !self.grid[row][col + 1].cont;
                 if widen {
                     // Ghostty-style: the glyph becomes wide, the cursor moves one right
                     let attr = self.grid[row][col].attr.clone();
-                    self.grid[row][col + 1] = Cell { ch: ' ', zw: None, attr, cont: true, shown: Color::None };
+                    self.grid[row][col + 1] = Cell { ch: ' ', zw: None, attr, cont: true, shown: 0 };
                     if self.col + 1 >= self.cols { self.col = self.cols - 1; self.pending_wrap = true; }
                     else { self.col += 1; }
                 }
@@ -484,9 +511,9 @@ impl Screen {
         }
         let row = self.row;
         let attr = self.attr.clone();
-        self.grid[row][self.col] = Cell { ch: c, zw: None, attr: attr.clone(), cont: false, shown: Color::None };
+        self.grid[row][self.col] = Cell { ch: c, zw: None, attr: attr.clone(), cont: false, shown: 0 };
         if w == 2 && self.col + 1 < self.cols {
-            self.grid[row][self.col + 1] = Cell { ch: ' ', zw: None, attr, cont: true, shown: Color::None };
+            self.grid[row][self.col + 1] = Cell { ch: ' ', zw: None, attr, cont: true, shown: 0 };
         }
         self.dirty[row] = true;
         if self.col + w >= self.cols { self.col = self.cols - 1; self.pending_wrap = true; }
@@ -704,10 +731,10 @@ impl Screen {
         // char; injecting bytes there would corrupt it. Rows stay dirty and
         // paint on the next chunk.
         if self.pst != PState::Ground || !self.utf8.is_empty() { return; }
-        let pal = palette();
         let mut text = String::new();
         let mut cell_of: Vec<usize> = Vec::new(); // byte offset -> cell index
-        let mut desired: Vec<Color> = Vec::new();
+        let mut desired: Vec<u8> = Vec::new();
+        let rm = remaps();
         let mut wrote = false;
         for r in 0..self.rows {
             if !self.dirty[r] { continue; }
@@ -723,10 +750,15 @@ impl Screen {
             cell_of.push(self.cols);
             self.spans_buf.clear();
             spans(&text, &mut self.spans_buf);
-            desired.clear(); desired.resize(self.cols, Color::None);
+            desired.clear(); desired.resize(self.cols, 0);
+            if !rm.is_empty() {
+                for (ci, cell) in self.grid[r].iter().enumerate() {
+                    if let Some(k) = rm.iter().position(|(from, _)| *from == cell.attr.fg) { desired[ci] = 16 + k as u8; }
+                }
+            }
             for &(s, e, color) in &self.spans_buf {
                 let (cs, ce) = (cell_of[s], cell_of[e]);
-                for d in desired.iter_mut().take(ce).skip(cs) { *d = color; }
+                for d in desired.iter_mut().take(ce).skip(cs) { *d = color as u8; }
             }
             // wide char continuation cells follow their head
             for c in 1..self.cols { if self.grid[r][c].cont { desired[c] = desired[c - 1]; } }
@@ -735,7 +767,7 @@ impl Screen {
                 if desired[c] == self.grid[r][c].shown || self.grid[r][c].cont { c += 1; continue; }
                 // run of cells to rewrite
                 let start = c;
-                let mut last_attr: Option<(Rc<Attr>, Color)> = None;
+                let mut last_attr: Option<(Rc<Attr>, u8)> = None;
                 let mut seg = String::new();
                 while c < self.cols && (desired[c] != self.grid[r][c].shown || self.grid[r][c].cont) {
                     let cell = &self.grid[r][c];
@@ -745,7 +777,7 @@ impl Screen {
                             None => true,
                         };
                         if need {
-                            seg.push_str(&cell.attr.render(&pal[desired[c] as usize]));
+                            seg.push_str(&cell.attr.render(code_sgr(desired[c])));
                             last_attr = Some((cell.attr.clone(), desired[c]));
                         }
                         seg.push(cell.ch);
