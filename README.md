@@ -1,37 +1,72 @@
 # claude-hl
 
-Run a TUI (default: `claude`) inside a PTY and paint shell commands in its
-output, Codex-style. The wrapped program runs completely unchanged, so hooks,
-skills, MCP, permissions and `/rc` all survive. Only `libc` as a dependency.
+Syntax colours for shell commands in Claude Code's output. Like Codex does it.
 
+Claude Code shows inline commands in one flat colour. `git commit -m "fix" --no-verify`
+is just a string. claude-hl sits between Claude Code and your terminal and paints
+the command blue, the flags pink, the string gold. Claude Code itself runs
+unchanged, so hooks, skills, MCP, permissions and `/rc` all keep working.
+
+## Install
+
+```sh
+cargo build --release
+cp target/release/claude-hl ~/.local/bin/
 ```
-cargo build --release && cp target/release/claude-hl ~/.local/bin/
-claude-hl [args passed to claude...]
-CLAUDE_HL_CMD=codex claude-hl        # wrap something else
-CLAUDE_HL_THEME=rose claude-hl       # rose-pine palette (default: codex)
-claude-hl --selftest                 # print sample highlighted text
-CLAUDE_HL_REMAP=b1b9f9=d2d6ff claude-hl   # add/override foreground recolours; empty disables
+
+One dependency (`libc`), one 380 KB binary, macOS and Linux.
+
+## Use
+
+```sh
+claude-hl                  # instead of `claude`; any args pass straight through
+claude-hl --resume abc123
 ```
 
-How it works: the child's raw output passes through untouched while a small
-VT emulator mirrors the screen (cursor, cell grid, attributes). After each
-chunk, rows whose text changed are re-tokenised and only the cells whose
-colour should differ are repainted with absolute cursor moves; cursor and
-attributes are then restored. This survives renderers that stream a line in
-pieces, which Claude Code does. At startup the terminal is asked for the
-cursor position (DSR); if it does not answer, highlighting is disabled and
-the stream is passed through unchanged. Width is never changed.
+That's it. There's nothing to configure.
 
-Token classes: command, subcommand, flag, quoted string, operator
-(`&& || | ; > >> < 2>&1`), path/number. `CLAUDE_HL_DUMP=/path` appends the
-raw PTY stream to a file for debugging.
+## Tweak
 
-Foreground remaps: every cell the app drew with an exact truecolor
-foreground is shown in another colour. Claude Code's markdown renderer
-resolves the theme by name and ignores custom-theme overrides for inline
-code, so both themes remap its stock lavender `b1b9f9` by default (codex →
-`a99cff`, rose → `c4a7e7`). `CLAUDE_HL_REMAP` takes comma-separated `from=to`
-hex pairs that add to or override the defaults; set it empty to disable.
+| Variable | What it does |
+|---|---|
+| `CLAUDE_HL_THEME=rose` | Rose Pine palette instead of the default Codex-style one |
+| `CLAUDE_HL_CMD=codex` | Wrap a different program |
+| `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
+| `CLAUDE_HL_DUMP=/tmp/hl.bin` | Append the raw PTY stream to a file, for bug reports |
 
-It reads rendered ANSI, not markdown, so it guesses commands with a
-vocabulary and will occasionally paint prose. That is inherent.
+`claude-hl --selftest` prints a sample so you can check colours without starting Claude.
+
+### Why is there a remap at all?
+
+Claude Code's inline code (`like this`) always uses the stock lavender, even
+with a custom theme. The markdown renderer looks the theme up by name and never
+sees your overrides. claude-hl already knows every cell's colour, so it swaps
+that lavender for something that fits each theme. Set your own pair if you
+disagree with the pick.
+
+## How it works
+
+The child's output passes through byte for byte. Alongside, a small terminal
+emulator mirrors the screen: cursor, cells, attributes, scroll regions, the
+alternate screen. After each chunk, rows whose text changed are re-tokenised
+and only the cells whose colour should differ get rewritten with an absolute
+cursor move. Then the cursor and attributes are put back.
+
+That design is what makes it stable. Claude Code streams a line in fragments
+(`Ran git`, then ` status`, then ` --short`), and a byte-level filter can't
+colour a fragment it can't see the start of. A screen model can.
+
+Tokens it knows: command, subcommand, flag, quoted string, operator
+(`&& || | ; > >> < 2>&1`), path, number. A stop-word list and a per-tool
+subcommand allowlist keep prose like "node here" unpainted.
+
+## Limits
+
+It reads rendered ANSI, not markdown. It can't know a fence's language, and it
+recognises commands by vocabulary, so now and then a prose word gets painted.
+That's inherent to the approach. If a real command is missed, add it to
+`COMMANDS` in `src/main.rs` and rebuild.
+
+## License
+
+MIT
