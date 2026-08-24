@@ -35,13 +35,19 @@ struct Theme {
 /// themes), so both themes lift that lavender a little by default.
 const STOCK_CODESPAN: &str = "b1b9f9";
 
+/// Stock dark `secondaryText` (tool output, timers, recaps) — same
+/// resolve-by-name bug, so custom-theme overrides never reach it.
+const STOCK_SECONDARY: &str = "999999";
+/// nvim rose-pine comment colour; what secondary text should look like.
+const NVIM_COMMENT: &str = "7a9a9a";
+
 const THEME_ROSE: Theme = Theme {
     cmd: "9ccfd8", sub: "c4a7e7", flag: "ebbcba", string: "f6c177", path: "e0def4", op: "9ccfd8",
-    remap: &[(STOCK_CODESPAN, "c4a7e7")],
+    remap: &[(STOCK_CODESPAN, "c4a7e7"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CODEX: Theme = Theme {
     cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
-    remap: &[(STOCK_CODESPAN, "a99cff")],
+    remap: &[(STOCK_CODESPAN, "a99cff"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 
 /// Colour classes; index 0 = "no override".
