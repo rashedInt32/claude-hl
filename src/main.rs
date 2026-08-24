@@ -938,14 +938,13 @@ fn run(argv: &[String]) -> i32 {
     let ws = if isatty { winsize(stdin) } else { None };
     let (rows, cols) = ws.map_or((24, 80), |w| (w.ws_row.max(1) as usize, w.ws_col.max(1) as usize));
 
-    // raw mode + cursor query before spawning, so the child never sees the DSR reply
     let mut old: Option<libc::termios> = None;
     let mut screen = Screen::new(rows, cols);
-    let mut leftover = Vec::new();
     if !isatty || !out_tty {
         // no terminal to measure or to draw on: pure passthrough
         screen.enabled = false;
     }
+    // raw mode before spawning so the DSR reply below never echoes
     if isatty && out_tty {
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
@@ -956,16 +955,6 @@ fn run(argv: &[String]) -> i32 {
                 libc::tcsetattr(stdin, libc::TCSAFLUSH, &raw);
             }
         }
-        let (pos, rest) = query_cursor(stdin, stdout);
-        match pos {
-            Some((r, c)) => screen.set_cursor(r, c),
-            None => {
-                // unknown cursor position: never guess, just pass through
-                screen.enabled = false;
-                eprintln!("claude-hl: terminal did not answer cursor query; highlighting disabled");
-            }
-        }
-        leftover = rest;
     }
 
     let cargs: Vec<CString> = argv.iter().map(|a| CString::new(a.as_str()).unwrap()).collect();
@@ -984,6 +973,24 @@ fn run(argv: &[String]) -> i32 {
     }
     if isatty {
         unsafe { libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t); }
+    }
+
+    // cursor query after spawning: the child boots during the terminal
+    // round-trip, so a slow (or silent, 400ms) reply costs no wall time.
+    // query_cursor strips the reply from stdin before it can reach the
+    // child; the child's output waits unread in the pty buffer meanwhile.
+    let mut leftover = Vec::new();
+    if isatty && out_tty {
+        let (pos, rest) = query_cursor(stdin, stdout);
+        match pos {
+            Some((r, c)) => screen.set_cursor(r, c),
+            None => {
+                // unknown cursor position: never guess, just pass through
+                screen.enabled = false;
+                eprintln!("claude-hl: terminal did not answer cursor query; highlighting disabled");
+            }
+        }
+        leftover = rest;
     }
     if !leftover.is_empty() { write_all(master, &leftover); }
 
