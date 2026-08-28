@@ -191,7 +191,7 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
     if b == b'-' {
         let mut j = i + 1;
         if j < n && t[j] == b'-' { j += 1; }
-        if j < n && t[j].is_ascii_alphabetic() {
+        if j < n && t[j].is_ascii_alphanumeric() {
             j += 1;
             while j < n && (is_word(t[j]) || t[j] == b'-') { j += 1; }
             if j < n && t[j] == b'=' {
@@ -1205,6 +1205,28 @@ mod tests {
         );
     }
 
+    // -- numeric short flags -------------------------------------------------
+
+    #[test]
+    fn numeric_short_flag_keeps_the_run_going() {
+        // `-0` used to return None, ending the arg loop: `xargs` kept its
+        // colour but every argument after it went plain.
+        assert_eq!(
+            painted("xargs -0 -n1 basename"),
+            [("xargs", "cmd"), ("-0", "flag"), ("-n1", "flag")]
+        );
+    }
+
+    #[test]
+    fn numeric_flag_as_first_arg_keeps_the_command_painted() {
+        // Same cause, worse symptom: None on the first argument left nargs at
+        // 0, so the command span was discarded and the row rendered plain.
+        assert_eq!(
+            painted("kill -9 -- -1234"),
+            [("kill", "cmd"), ("-9", "flag"), ("--", "flag"), ("-1234", "flag")]
+        );
+    }
+
     // -- guards that must not regress ----------------------------------------
 
     #[test]
@@ -1220,4 +1242,12 @@ mod tests {
         assert_eq!(painted("Plain prose with the word node in it"), []);
     }
 
+    #[test]
+    fn pipeline_keeps_both_sides() {
+        assert_eq!(
+            painted("find . -name '*.sql' -print0 | xargs -0 basename"),
+            [("find", "cmd"), (".", "path"), ("-name", "flag"), ("'*.sql'", "str"),
+             ("-print0", "flag"), ("|", "op"), ("xargs", "cmd"), ("-0", "flag")]
+        );
+    }
 }
