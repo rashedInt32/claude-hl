@@ -191,7 +191,7 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
     if b == b'-' {
         let mut j = i + 1;
         if j < n && t[j] == b'-' { j += 1; }
-        if j < n && t[j].is_ascii_alphabetic() {
+        if j < n && t[j].is_ascii_alphanumeric() {
             j += 1;
             while j < n && (is_word(t[j]) || t[j] == b'-') { j += 1; }
             if j < n && t[j] == b'=' {
@@ -224,6 +224,34 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
     None
 }
 
+/// Does the byte at `i` open a quoted run? A double quote always does. An
+/// apostrophe only does at a word edge, so prose like `isn't` keeps its
+/// letters instead of opening a string that swallows the rest of the row.
+fn opens_quote(t: &[u8], i: usize) -> bool {
+    match t[i] {
+        b'"' => true,
+        b'\'' => i == 0 || matches!(t[i - 1], b' ' | b'\t' | b'=' | b'(' | b'"'),
+        _ => false,
+    }
+}
+
+/// Index just past the run opened at `i`, or None when nothing closes it on
+/// this row. An unmatched quote stays an ordinary byte: skipping to the end of
+/// the row on a lone apostrophe would unpaint every command after it.
+fn quoted_end(t: &[u8], i: usize) -> Option<usize> {
+    if !opens_quote(t, i) { return None; }
+    let (q, n) = (t[i], t.len());
+    let mut j = i + 1;
+    while j < n {
+        match t[j] {
+            b'\\' if q == b'"' && j + 1 < n => j += 2,
+            c if c == q => return Some(j + 1),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
 /// Find the next known command word at or after `from`.
 fn find_cmd(t: &[u8], from: usize) -> Option<(usize, usize)> {
     let v = vocab();
@@ -231,8 +259,12 @@ fn find_cmd(t: &[u8], from: usize) -> Option<(usize, usize)> {
     let mut i = from;
     while i < n {
         if is_space(t[i]) { i += 1; continue; }
+        // a command word inside a string literal is data, not a command
+        if let Some(e) = quoted_end(t, i) { i = e; continue; }
         let start = i;
-        while i < n && !is_space(t[i]) { i += 1; }
+        while i < n && !is_space(t[i]) {
+            match quoted_end(t, i) { Some(e) => i = e, None => i += 1 }
+        }
         let mut p = start;
         while p < i {
             if p == 0 || !is_cmd_glue(t[p - 1]) {
@@ -1092,4 +1124,130 @@ fn main() {
     let mut argv = vec![cmd];
     argv.extend(args);
     std::process::exit(run(&argv));
+}
+
+// ---- tests -----------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render one row's spans as `text=KIND` pairs, in order, so a failing
+    /// assert prints what was painted instead of a byte-range diff.
+    fn painted(line: &str) -> Vec<(&str, &'static str)> {
+        let mut v = Vec::new();
+        spans(line, &mut v);
+        v.sort_by_key(|s| s.0);
+        v.into_iter()
+            .map(|(s, e, c)| {
+                let kind = match c {
+                    Color::Cmd => "cmd", Color::Sub => "sub", Color::Flag => "flag",
+                    Color::Str => "str", Color::Path => "path", Color::Op => "op",
+                    Color::None => "none",
+                };
+                (&line[s..e], kind)
+            })
+            .collect()
+    }
+
+    // -- a command word inside a string literal is data ----------------------
+
+    #[test]
+    fn quoted_argument_is_never_tokenised_as_shell() {
+        // `cd` and `&&` live inside the quotes; painting them made the string
+        // look like a second command line.
+        assert_eq!(painted(r#"ssh box "cd /srv && ./run.sh --dry-run 'a b c'""#), []);
+    }
+
+    #[test]
+    fn flag_inside_a_string_stays_string() {
+        assert_eq!(
+            painted(r#"echo "use --force to override""#),
+            [("echo", "cmd"), (r#""use --force to override""#, "str")]
+        );
+    }
+
+    #[test]
+    fn nested_quotes_do_not_split_the_outer_string() {
+        // The inner apostrophes must not end the double-quoted run, and
+        // `cd`/`AS` inside it must not be picked up as a second command.
+        assert_eq!(
+            painted(r#"echo "SELECT 'off-state' AS s WHERE cd = 'x';""#),
+            [("echo", "cmd"), (r#""SELECT 'off-state' AS s WHERE cd = 'x';""#, "str")]
+        );
+    }
+
+    // -- an apostrophe in prose is not a quote -------------------------------
+
+    #[test]
+    fn lone_apostrophe_does_not_swallow_the_rest_of_the_row() {
+        assert_eq!(
+            painted("don't run git status --short"),
+            [("git", "cmd"), ("status", "sub"), ("--short", "flag")]
+        );
+    }
+
+    #[test]
+    fn two_apostrophes_in_prose_do_not_form_a_quoted_run() {
+        // A naive scanner reads `'t run git'` as a string and loses `git`.
+        assert_eq!(
+            painted("it isn't the agent's job to run git status"),
+            [("git", "cmd"), ("status", "sub")]
+        );
+    }
+
+    #[test]
+    fn quoted_glob_after_equals_still_reads_as_a_string() {
+        assert_eq!(
+            painted("tar -czvf backup.tgz --exclude='*.tmp' -- ./data"),
+            [("tar", "cmd"), ("-czvf", "flag"), ("backup.tgz", "path"),
+             ("--exclude='*.tmp'", "flag"), ("--", "flag"), ("./data", "path")]
+        );
+    }
+
+    // -- numeric short flags -------------------------------------------------
+
+    #[test]
+    fn numeric_short_flag_keeps_the_run_going() {
+        // `-0` used to return None, ending the arg loop: `xargs` kept its
+        // colour but every argument after it went plain.
+        assert_eq!(
+            painted("xargs -0 -n1 basename"),
+            [("xargs", "cmd"), ("-0", "flag"), ("-n1", "flag")]
+        );
+    }
+
+    #[test]
+    fn numeric_flag_as_first_arg_keeps_the_command_painted() {
+        // Same cause, worse symptom: None on the first argument left nargs at
+        // 0, so the command span was discarded and the row rendered plain.
+        assert_eq!(
+            painted("kill -9 -- -1234"),
+            [("kill", "cmd"), ("-9", "flag"), ("--", "flag"), ("-1234", "flag")]
+        );
+    }
+
+    // -- guards that must not regress ----------------------------------------
+
+    #[test]
+    fn leading_command_is_found_before_any_quote() {
+        assert_eq!(
+            painted(r#"git commit -m "fix: 86 push guard""#),
+            [("git", "cmd"), ("commit", "sub"), ("-m", "flag"), (r#""fix: 86 push guard""#, "str")]
+        );
+    }
+
+    #[test]
+    fn bare_command_word_in_prose_stays_plain() {
+        assert_eq!(painted("Plain prose with the word node in it"), []);
+    }
+
+    #[test]
+    fn pipeline_keeps_both_sides() {
+        assert_eq!(
+            painted("find . -name '*.sql' -print0 | xargs -0 basename"),
+            [("find", "cmd"), (".", "path"), ("-name", "flag"), ("'*.sql'", "str"),
+             ("-print0", "flag"), ("|", "op"), ("xargs", "cmd"), ("-0", "flag")]
+        );
+    }
 }
