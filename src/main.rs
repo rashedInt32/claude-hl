@@ -121,27 +121,44 @@ terraform aws gcloud az ssh scp rsync curl wget tar zip unzip cd ls cat head \
 tail less grep rg fd find xargs sed awk sort uniq wc tr cut tee echo printf \
 export source chmod chown mkdir rmdir rm cp mv ln touch pwd which env nvim vim \
 tmux ghostty claude codex gemini open kill pkill ps lsof jq yq tsc tsx vitest \
-jest eslint prettier next vite";
+jest eslint prettier next vite \
+sudo doas nohup just pytest ruff mypy poetry pipx uvx conda mvn gradle dotnet \
+swift ruby gem bundle rake rspec php composer psql mysql sqlite3 redis-cli \
+mongosh systemctl journalctl launchctl xcodebuild xcrun flutter dart adb \
+ffmpeg pandoc openssl gpg shellcheck protoc ansible vagrant nix zig perl lua \
+gcc clang ninja bazel";
 
 /// tools whose bare-word args are subcommands; for others (node, cat, cd...)
 /// only flags/paths/strings count, so prose like "node here" stays plain
 const SUBCMD_TOOLS: &str = "git gh npm npx pnpm yarn bun bunx deno uv pip pip3 go cargo brew apt apt-get \
 dnf pacman docker docker-compose kubectl helm terraform aws gcloud az claude \
-codex gemini tmux make jq tsc next vite";
+codex gemini tmux make jq tsc next vite \
+sudo doas nohup poetry pipx conda mvn gradle dotnet swift gem bundle rake \
+composer systemctl journalctl launchctl flutter dart adb nix vagrant bazel openssl";
+
+/// prefix runners: a known command word right after them re-anchors the
+/// highlight, so `sudo systemctl ...` paints systemctl as a command again
+const CHAIN_TOOLS: &str = "sudo doas env xargs nohup";
 
 const STOP_WORDS: &str = "and or then to the a an in on for with is it that this if of at by from so but \
-you we i will can should after before when";
+you we i will can should after before when do not into was are has have your our";
 
 /// bare words accepted after the command (e.g. `push origin main`)
 const MAX_SUB: usize = 3;
 
-struct Vocab { commands: HashSet<&'static str>, subcmd_tools: HashSet<&'static str>, stop_words: HashSet<&'static str> }
+struct Vocab {
+    commands: HashSet<&'static str>,
+    subcmd_tools: HashSet<&'static str>,
+    chain_tools: HashSet<&'static str>,
+    stop_words: HashSet<&'static str>,
+}
 
 fn vocab() -> &'static Vocab {
     static V: OnceLock<Vocab> = OnceLock::new();
     V.get_or_init(|| Vocab {
         commands: COMMANDS.split_whitespace().collect(),
         subcmd_tools: SUBCMD_TOOLS.split_whitespace().collect(),
+        chain_tools: CHAIN_TOOLS.split_whitespace().collect(),
         stop_words: STOP_WORDS.split_whitespace().collect(),
     })
 }
@@ -199,6 +216,12 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
                 while j < n && !is_space(t[j]) { j += 1; }
             }
             return Some((Kind::Flag, j));
+        }
+        // numeric flags: `tail -20`, `head -5`
+        if j < n && t[j].is_ascii_digit() {
+            let mut k = j + 1;
+            while k < n && t[k].is_ascii_digit() { k += 1; }
+            if at_boundary(t, k) { return Some((Kind::Flag, k)); }
         }
         if j == i + 2 && at_boundary(t, j) { return Some((Kind::Flag, j)); }
     }
@@ -275,6 +298,16 @@ fn spans(text: &str, out: &mut Vec<(usize, usize, Color)>) {
             }
             let color = match kind {
                 Kind::Sub => {
+                    // `sudo systemctl restart ...`: the runner hands off to a
+                    // real command, so restart the highlight from there
+                    if v.chain_tools.contains(cmd) && v.commands.contains(tok) {
+                        out.push((i, end, Color::Cmd));
+                        cmd = tok;
+                        subs = 0;
+                        nargs += 1;
+                        i = end;
+                        continue;
+                    }
                     if v.stop_words.contains(tok) || subs >= MAX_SUB || !v.subcmd_tools.contains(cmd) { break; }
                     subs += 1;
                     Color::Sub
@@ -1073,6 +1106,8 @@ Ran git diff -- crates/ts_checker/src/semantic/assignment.rs | sed -n '1,300p'\r
 Run git status to see changes, then:\r\n\
   git commit -m \"fix: pty filter\" --no-verify\r\n\
   npm install --save-dev vitest and restart the server.\r\n\
+  sudo systemctl restart nginx && journalctl -u nginx --since today\r\n\
+  pytest tests/test_auth.py -k \"login\" | tail -20\r\n\
 Use \x1b[38;2;95;179;217mclaude --rc \"my-project\"\x1b[39m from the project dir.\r\n\
 Plain prose with the word node in it, and cd ~/Documents/codes/packages.\r\n\
 \x1b[1m● streamed:\x1b[22m Ran git\x1b[0m";
