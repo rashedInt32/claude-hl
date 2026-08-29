@@ -49,7 +49,7 @@ const THEME_ROSE: Theme = Theme {
 };
 const THEME_CODEX: Theme = Theme {
     cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
-    remap: &[(STOCK_CODESPAN, "e5c07b")],
+    remap: &[(STOCK_CODESPAN, "e5c07b"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CATPPUCCIN: Theme = Theme {
     cmd: "89b4fa", sub: "94e2d5", flag: "f5c2e7", string: "f9e2af", path: "cdd6f4", op: "89dceb",
