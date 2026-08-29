@@ -3,9 +3,10 @@
 //!
 //!   claude-hl [args passed to claude...]
 //!   CLAUDE_HL_CMD=codex claude-hl        # wrap something else
-//!   CLAUDE_HL_THEME=rose claude-hl       # rose-pine palette (default: codex)
+//!   CLAUDE_HL_THEME=rose claude-hl       # rose | catppuccin | tokyonight | dracula | gruvbox | nord (default: codex)
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   claude-hl --selftest                 # print sample highlighted text
+//!   claude-hl --themes                   # preview every theme
 //!
 //! How it works: the child's raw output is passed through untouched while a
 //! small VT emulator mirrors the screen (cursor, cell grid, attributes).
@@ -32,11 +33,12 @@ struct Theme {
 
 /// Claude Code's inline code always uses the stock dark `permission` colour
 /// (the markdown renderer resolves the theme by name, bypassing custom
-/// themes), so both themes lift that lavender a little by default.
+/// themes), so themes replace that lavender with their own accent.
 const STOCK_CODESPAN: &str = "b1b9f9";
 
-/// Stock dark `secondaryText` (tool output, timers, recaps) — same
-/// resolve-by-name bug, so custom-theme overrides never reach it.
+/// Stock dark `secondaryText` (tool output, timers, recaps, typed slash
+/// commands) — same resolve-by-name bug, so custom-theme overrides never
+/// reach it. Themes lift that flat gray into their own tint.
 const STOCK_SECONDARY: &str = "999999";
 /// nvim rose-pine comment colour; what secondary text should look like.
 const NVIM_COMMENT: &str = "7a9a9a";
@@ -47,8 +49,30 @@ const THEME_ROSE: Theme = Theme {
 };
 const THEME_CODEX: Theme = Theme {
     cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
-    remap: &[(STOCK_CODESPAN, "a99cff"), (STOCK_SECONDARY, NVIM_COMMENT)],
+    remap: &[(STOCK_CODESPAN, "e5c07b")],
 };
+const THEME_CATPPUCCIN: Theme = Theme {
+    cmd: "89b4fa", sub: "94e2d5", flag: "f5c2e7", string: "f9e2af", path: "cdd6f4", op: "89dceb",
+    remap: &[(STOCK_CODESPAN, "cba6f7"), (STOCK_SECONDARY, "7f849c")],
+};
+const THEME_TOKYO: Theme = Theme {
+    cmd: "7aa2f7", sub: "73daca", flag: "bb9af7", string: "e0af68", path: "c0caf5", op: "7dcfff",
+    remap: &[(STOCK_CODESPAN, "9d7cd8"), (STOCK_SECONDARY, "737aa2")],
+};
+const THEME_DRACULA: Theme = Theme {
+    cmd: "8be9fd", sub: "50fa7b", flag: "ff79c6", string: "f1fa8c", path: "f8f8f2", op: "bd93f9",
+    remap: &[(STOCK_CODESPAN, "bd93f9"), (STOCK_SECONDARY, "6272a4")],
+};
+const THEME_GRUVBOX: Theme = Theme {
+    cmd: "83a598", sub: "8ec07c", flag: "d3869b", string: "fabd2f", path: "ebdbb2", op: "fe8019",
+    remap: &[(STOCK_CODESPAN, "b8bb26"), (STOCK_SECONDARY, "928374")],
+};
+const THEME_NORD: Theme = Theme {
+    cmd: "88c0d0", sub: "8fbcbb", flag: "b48ead", string: "ebcb8b", path: "eceff4", op: "81a1c1",
+    remap: &[(STOCK_CODESPAN, "b48ead"), (STOCK_SECONDARY, "616e88")],
+};
+
+const THEME_NAMES: &[&str] = &["codex", "rose", "catppuccin", "tokyonight", "dracula", "gruvbox", "nord"];
 
 /// Colour classes; index 0 = "no override".
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,10 +84,21 @@ fn rgb(h: &str) -> String {
     format!("\x1b[38;2;{};{};{}m", c(0), c(2), c(4))
 }
 
+/// like `rgb`, but bold too; used for the command word
+fn rgb_bold(h: &str) -> String {
+    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(255);
+    format!("\x1b[1;38;2;{};{};{}m", c(0), c(2), c(4))
+}
+
 /// SGR strings indexed by Color.
 fn theme() -> &'static Theme {
     match std::env::var("CLAUDE_HL_THEME").as_deref() {
         Ok("rose") => &THEME_ROSE,
+        Ok("catppuccin") => &THEME_CATPPUCCIN,
+        Ok("tokyo") | Ok("tokyonight") => &THEME_TOKYO,
+        Ok("dracula") => &THEME_DRACULA,
+        Ok("gruvbox") => &THEME_GRUVBOX,
+        Ok("nord") => &THEME_NORD,
         _ => &THEME_CODEX,
     }
 }
@@ -72,7 +107,7 @@ fn palette() -> &'static [String; 7] {
     static P: OnceLock<[String; 7]> = OnceLock::new();
     P.get_or_init(|| {
         let t = theme();
-        [String::new(), rgb(t.cmd), rgb(t.sub), rgb(t.flag), rgb(t.string), rgb(t.path), rgb(t.op)]
+        [String::new(), rgb_bold(t.cmd), rgb(t.sub), rgb(t.flag), rgb(t.string), rgb(t.path), rgb(t.op)]
     })
 }
 
@@ -1114,6 +1149,16 @@ Plain prose with the word node in it, and cd ~/Documents/codes/packages.\r\n\
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--themes") {
+        // palette() is fixed per process, so preview each theme in a child
+        let exe = std::env::current_exe().unwrap_or_else(|_| "claude-hl".into());
+        for name in THEME_NAMES {
+            println!("\x1b[1m{name}\x1b[0m  (CLAUDE_HL_THEME={name})");
+            let _ = std::process::Command::new(&exe).arg("--selftest").env("CLAUDE_HL_THEME", name).status();
+            println!();
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("--selftest") {
         let mut sc = Screen::new(40, 200);
         sc.feed(SAMPLE.as_bytes());
