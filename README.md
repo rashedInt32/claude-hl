@@ -42,12 +42,14 @@ That's it. There's nothing to configure.
 
 | Variable | What it does |
 |---|---|
-| `CLAUDE_HL_THEME=rose` | Rose Pine palette instead of the default Codex-style one |
+| `CLAUDE_HL_THEME=rose` | Pick a palette: `codex` (default), `rose`, `catppuccin`, `tokyonight`, `dracula`, `gruvbox`, `nord` |
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
 | `CLAUDE_HL_DUMP=/tmp/hl.bin` | Append the raw PTY stream to a file, for bug reports |
 
-`claude-hl --selftest` prints a sample so you can check colours without starting Claude.
+`claude-hl --selftest` prints a sample so you can check colours without starting
+Claude. `claude-hl --themes` prints that sample once per theme, so you can pick
+one by eye.
 
 ### Why is there a remap at all?
 
@@ -89,9 +91,11 @@ That design is what makes it stable. Claude Code streams a line in fragments
 (`Ran git`, then ` status`, then ` --short`), and a byte-level filter can't
 colour a fragment it can't see the start of. A screen model can.
 
-Tokens it knows: command, subcommand, flag, quoted string, operator
-(`&& || | ; > >> < 2>&1`), path, number. A stop-word list and a per-tool
-subcommand allowlist keep prose like "node here" unpainted.
+Tokens it knows: command, subcommand, flag (`--long`, `-s`, `-20`), quoted
+string, operator (`&& || | ; > >> < 2>&1`), path, number. Commands render bold.
+Prefix runners chain: in `sudo systemctl restart nginx` both words paint as
+commands. A stop-word list and a per-tool subcommand allowlist keep prose like
+"node here" unpainted.
 
 ## Limits
 
