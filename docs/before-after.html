@@ -4,19 +4,20 @@
   BEFORE pane: a Claude Code transcript with only Claude Code's own colours
   (secondaryText 999999 for tool output, codespan b1b9f9 for inline code).
   AFTER pane: the exact same bytes fed through claude-hl's screen model and
-  rendered by `CLAUDE_HL_THEME=tokyonight claude-hl --selftest`, ANSI converted to spans.
-  Screenshot: chrome --headless --force-device-scale-factor=2 --window-size=1060,1845
+  rendered by `CLAUDE_HL_THEME=codex claude-hl --selftest`, ANSI converted to spans.
+  Pane default foreground is #b8b8b8, a neutral terminal foreground, dimmer than the theme's path tint.
+  Screenshot: chrome --headless --force-device-scale-factor=2 --window-size=1060,<scrollHeight>
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>claude-hl — before and after</title>
+<title>claude-hl — before and after (codex)</title>
 <style>
   :root {
     --page: #0b1120;
     --panel: #121a2b;
     --bar: #1a2438;
-    --fg: #a9b1d6;   /* tokyonight's own terminal foreground */
+    --fg: #b8b8b8;
     --muted: #6f7c93;
     --edge: #1f2a3f;
   }
@@ -97,7 +98,7 @@
     <p class="lede">
       The same Claude Code session, seen through a plain terminal and through claude-hl.
       Nothing about Claude Code changes; only the colours of what it prints.
-      Second pane is the <code>tokyonight</code> theme.
+      Second pane is the default <code>codex</code> theme.
     </p>
 
     <div class="label"><b>BEFORE</b><span>claude</span></div>
@@ -144,51 +145,51 @@
         <div class="dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
         <span>claude-hl — 120×32</span>
       </div>
-      <pre><span class="dim" style="color:#565f89">╭──────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
-<span class="dim" style="color:#565f89">│</span><span class="d"> &gt; ship the release: run the checks, then commit and tag it                                       </span><span class="dim" style="color:#565f89">│</span>
-<span class="dim" style="color:#565f89">╰──────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
+      <pre><span class="dim" style="color:#7a9a9a">╭──────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<span class="dim" style="color:#7a9a9a">│</span><span class="d"> &gt; ship the release: run the checks, then commit and tag it                                       </span><span class="dim" style="color:#7a9a9a">│</span>
+<span class="dim" style="color:#7a9a9a">╰──────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">status</span><span class="d"> </span><span style="color:#bb9af7">--short</span><span class="d"> </span><span style="color:#7dcfff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">diff</span><span class="d"> </span><span style="color:#bb9af7">--stat</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">   </span><span style="color:#e0af68">M</span><span style="color:#737aa2"> </span><span style="color:#c0caf5">src/main.rs</span>
-<span style="color:#737aa2">     </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> file changed, </span><span style="color:#ff9e64">24</span><span style="color:#737aa2"> insertions(+), </span><span style="color:#ff9e64">3</span><span style="color:#737aa2"> deletions(-)</span>
+<span class="d">⏺ </span><span class="b" style="color:#c678dd">Bash</span><span class="d">(</span><span class="b" style="color:#6fb3ff">git</span><span class="d"> </span><span style="color:#7fc8b8">status</span><span class="d"> </span><span style="color:#e78fc7">--short</span><span class="d"> </span><span style="color:#6fb3ff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#6fb3ff">git</span><span class="d"> </span><span style="color:#7fc8b8">diff</span><span class="d"> </span><span style="color:#e78fc7">--stat</span><span class="d">)</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">   </span><span style="color:#e5c07b">M</span><span style="color:#7a9a9a"> </span><span style="color:#d0d0d0">src/main.rs</span>
+<span style="color:#7a9a9a">     </span><span style="color:#d19a66">1</span><span style="color:#7a9a9a"> file changed, </span><span style="color:#d19a66">24</span><span style="color:#7a9a9a"> insertions(+), </span><span style="color:#d19a66">3</span><span style="color:#7a9a9a"> deletions(-)</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">cargo</span><span class="d"> </span><span style="color:#73daca">test</span><span class="d"> </span><span style="color:#bb9af7">--release</span><span class="d"> </span><span style="color:#bb9af7">--</span><span class="d"> </span><span style="color:#bb9af7">--nocapture</span><span class="d"> </span><span style="color:#7dcfff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#7dcfff">|</span><span class="d"> </span><span class="b" style="color:#7aa2f7">tail</span><span class="d"> </span><span style="color:#bb9af7">-n</span><span class="d"> </span><span style="color:#ff9e64">5</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  </span><span style="color:#f7768e">error</span><span style="color:#737aa2">[E0308]: mismatched types --&gt; </span><span style="color:#c0caf5">src/main.rs</span><span style="color:#ff9e64">:42:7</span>
-<span style="color:#737aa2">     </span><span style="color:#e0af68">warning</span><span style="color:#737aa2">: unused variable `n`</span>
-<span style="color:#737aa2">     test result: </span><span style="color:#f7768e">FAILED</span><span style="color:#737aa2">. </span><span style="color:#ff9e64">22</span><span style="color:#737aa2"> </span><span style="color:#9ece6a">passed</span><span style="color:#737aa2">; </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> </span><span style="color:#f7768e">failed</span><span style="color:#737aa2">; finished in </span><span style="color:#ff9e64">0.38s</span>
+<span class="d">⏺ </span><span class="b" style="color:#c678dd">Bash</span><span class="d">(</span><span class="b" style="color:#6fb3ff">cargo</span><span class="d"> </span><span style="color:#7fc8b8">test</span><span class="d"> </span><span style="color:#e78fc7">--release</span><span class="d"> </span><span style="color:#e78fc7">--</span><span class="d"> </span><span style="color:#e78fc7">--nocapture</span><span class="d"> </span><span style="color:#6fb3ff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#6fb3ff">|</span><span class="d"> </span><span class="b" style="color:#6fb3ff">tail</span><span class="d"> </span><span style="color:#e78fc7">-n</span><span class="d"> </span><span style="color:#d19a66">5</span><span class="d">)</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  </span><span style="color:#e06c75">error</span><span style="color:#7a9a9a">[E0308]: mismatched types --&gt; </span><span style="color:#d0d0d0">src/main.rs</span><span style="color:#d19a66">:42:7</span>
+<span style="color:#7a9a9a">     </span><span style="color:#e5c07b">warning</span><span style="color:#7a9a9a">: unused variable `n`</span>
+<span style="color:#7a9a9a">     test result: </span><span style="color:#e06c75">FAILED</span><span style="color:#7a9a9a">. </span><span style="color:#d19a66">22</span><span style="color:#7a9a9a"> </span><span style="color:#98c379">passed</span><span style="color:#7a9a9a">; </span><span style="color:#d19a66">1</span><span style="color:#7a9a9a"> </span><span style="color:#e06c75">failed</span><span style="color:#7a9a9a">; finished in </span><span style="color:#d19a66">0.38s</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Read</span><span class="d">(</span><span style="color:#c0caf5">src/main.rs</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  Read </span><span style="color:#ff9e64">120</span><span style="color:#737aa2"> lines</span>
+<span class="d">⏺ </span><span class="b" style="color:#c678dd">Read</span><span class="d">(</span><span style="color:#d0d0d0">src/main.rs</span><span class="d">)</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  Read </span><span style="color:#d19a66">120</span><span style="color:#7a9a9a"> lines</span>
 &nbsp;
 <span class="d">⏺ One borrow slipped into the release path. Fixed it, then ran the suite again.</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">cargo</span><span class="d"> </span><span style="color:#73daca">test</span><span class="d"> </span><span style="color:#bb9af7">--release</span><span class="d"> </span><span style="color:#7dcfff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#7dcfff">|</span><span class="d"> </span><span class="b" style="color:#7aa2f7">tail</span><span class="d"> </span><span style="color:#bb9af7">-n</span><span class="d"> </span><span style="color:#ff9e64">3</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  test result: </span><span style="color:#9ece6a">ok</span><span style="color:#737aa2">. </span><span style="color:#ff9e64">23</span><span style="color:#737aa2"> </span><span style="color:#9ece6a">passed</span><span style="color:#737aa2">; </span><span style="color:#ff9e64">0</span><span style="color:#737aa2"> </span><span style="color:#f7768e">failed</span><span style="color:#737aa2">; finished in </span><span style="color:#ff9e64">0.42s</span>
+<span class="d">⏺ </span><span class="b" style="color:#c678dd">Bash</span><span class="d">(</span><span class="b" style="color:#6fb3ff">cargo</span><span class="d"> </span><span style="color:#7fc8b8">test</span><span class="d"> </span><span style="color:#e78fc7">--release</span><span class="d"> </span><span style="color:#6fb3ff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#6fb3ff">|</span><span class="d"> </span><span class="b" style="color:#6fb3ff">tail</span><span class="d"> </span><span style="color:#e78fc7">-n</span><span class="d"> </span><span style="color:#d19a66">3</span><span class="d">)</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  test result: </span><span style="color:#98c379">ok</span><span style="color:#7a9a9a">. </span><span style="color:#d19a66">23</span><span style="color:#7a9a9a"> </span><span style="color:#98c379">passed</span><span style="color:#7a9a9a">; </span><span style="color:#d19a66">0</span><span style="color:#7a9a9a"> </span><span style="color:#e06c75">failed</span><span style="color:#7a9a9a">; finished in </span><span style="color:#d19a66">0.42s</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">commit</span><span class="d"> </span><span style="color:#bb9af7">-m</span><span class="d"> </span><span style="color:#e0af68">&quot;release: v1.2.0&quot;</span><span class="d"> </span><span style="color:#bb9af7">--no-verify</span><span class="d"> </span><span style="color:#7dcfff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">tag</span><span class="d"> </span><span style="color:#ff9e64">v1.2.0</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  [main 4f21ac9] release: v1.2.0</span>
-<span style="color:#737aa2">      </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> file changed, </span><span style="color:#ff9e64">24</span><span style="color:#737aa2"> insertions(+), </span><span style="color:#ff9e64">3</span><span style="color:#737aa2"> deletions(-)</span>
+<span class="d">⏺ </span><span class="b" style="color:#c678dd">Bash</span><span class="d">(</span><span class="b" style="color:#6fb3ff">git</span><span class="d"> </span><span style="color:#7fc8b8">commit</span><span class="d"> </span><span style="color:#e78fc7">-m</span><span class="d"> </span><span style="color:#e5c07b">&quot;release: v1.2.0&quot;</span><span class="d"> </span><span style="color:#e78fc7">--no-verify</span><span class="d"> </span><span style="color:#6fb3ff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#6fb3ff">git</span><span class="d"> </span><span style="color:#7fc8b8">tag</span><span class="d"> </span><span style="color:#d19a66">v1.2.0</span><span class="d">)</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  [main 4f21ac9] release: v1.2.0</span>
+<span style="color:#7a9a9a">      </span><span style="color:#d19a66">1</span><span style="color:#7a9a9a"> file changed, </span><span style="color:#d19a66">24</span><span style="color:#7a9a9a"> insertions(+), </span><span style="color:#d19a66">3</span><span style="color:#7a9a9a"> deletions(-)</span>
 &nbsp;
-<span class="d">⏺ Tagged. </span><span style="color:#9d7cd8">v1.2.0</span><span class="d"> is on </span><span style="color:#9d7cd8">main</span><span class="d">; push with </span><span class="b" style="color:#7aa2f7">git</span><span style="color:#9d7cd8"> </span><span style="color:#73daca">push</span><span style="color:#9d7cd8"> </span><span style="color:#bb9af7">--follow-tags</span><span class="d"> when you&#x27;re ready.</span>
-<span class="d">  The build log is in </span><span style="color:#c0caf5">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#c0caf5">~/.config/app.toml</span><span class="d">.</span>
-<span class="d">  See </span><span class="u" style="color:#7aa2f7">https://docs.rs/libc</span><span class="d"> if the linker complains, and make sure the next step is a clean tree.</span>
+<span class="d">⏺ Tagged. </span><span style="color:#e5c07b">v1.2.0</span><span class="d"> is on </span><span style="color:#e5c07b">main</span><span class="d">; push with </span><span class="b" style="color:#6fb3ff">git</span><span style="color:#e5c07b"> </span><span style="color:#7fc8b8">push</span><span style="color:#e5c07b"> </span><span style="color:#e78fc7">--follow-tags</span><span class="d"> when you&#x27;re ready.</span>
+<span class="d">  The build log is in </span><span style="color:#d0d0d0">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#d0d0d0">~/.config/app.toml</span><span class="d">.</span>
+<span class="d">  See </span><span class="u" style="color:#6fb3ff">https://docs.rs/libc</span><span class="d"> if the linker complains, and make sure the next step is a clean tree.</span>
 &nbsp;
-<span style="color:#737aa2">✻ Shipped for </span><span style="color:#ff9e64">14s</span></pre>
+<span style="color:#7a9a9a">✻ Shipped for </span><span style="color:#d19a66">14s</span></pre>
     </div>
 
     <ul class="key">
-      <li><i style="background:#7aa2f7"></i>command</li>
-      <li><i style="background:#73daca"></i>subcommand</li>
-      <li><i style="background:#bb9af7"></i>flag</li>
-      <li><i style="background:#e0af68"></i>string</li>
-      <li><i style="background:#7dcfff"></i>operator</li>
-      <li><i style="background:#c0caf5"></i>path</li>
-      <li><i style="background:#ff9e64"></i>number</li>
-      <li><i style="background:#bb9af7"></i>tool</li>
-      <li><i style="background:#f7768e"></i>error</li>
-      <li><i style="background:#9ece6a"></i>pass</li>
-      <li><i style="background:#9d7cd8"></i>inline code (remapped)</li>
-      <li><i style="background:#737aa2"></i>chrome</li>
+      <li><i style="background:#6fb3ff"></i>command</li>
+      <li><i style="background:#7fc8b8"></i>subcommand</li>
+      <li><i style="background:#e78fc7"></i>flag</li>
+      <li><i style="background:#e5c07b"></i>string</li>
+      <li><i style="background:#6fb3ff"></i>operator</li>
+      <li><i style="background:#d0d0d0"></i>path</li>
+      <li><i style="background:#d19a66"></i>number</li>
+      <li><i style="background:#c678dd"></i>tool</li>
+      <li><i style="background:#e06c75"></i>error</li>
+      <li><i style="background:#98c379"></i>pass</li>
+      <li><i style="background:#e5c07b"></i>inline code (remapped)</li>
+      <li><i style="background:#7a9a9a"></i>chrome</li>
     </ul>
   </div>
 </body>

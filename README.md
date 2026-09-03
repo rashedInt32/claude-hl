@@ -55,6 +55,9 @@ Claude. `claude-hl --themes` prints that sample once per theme, so you can pick
 one by eye. `claude-hl --version` prints the wrapper's own version; every other
 argument goes to Claude.
 
+The screenshot at the top is the default `codex` theme. Here is
+[the same session in `tokyonight`](docs/before-after-tokyonight.png).
+
 ### Why is there a remap at all?
 
 Claude Code's inline code (`like this`) always uses the stock lavender, even

@@ -1,0 +1,195 @@
+<!doctype html>
+<!--
+  Generated mock-up for the README image.
+  BEFORE pane: a Claude Code transcript with only Claude Code's own colours
+  (secondaryText 999999 for tool output, codespan b1b9f9 for inline code).
+  AFTER pane: the exact same bytes fed through claude-hl's screen model and
+  rendered by `CLAUDE_HL_THEME=tokyonight claude-hl --selftest`, ANSI converted to spans.
+  Screenshot: chrome --headless --force-device-scale-factor=2 --window-size=1060,1845
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>claude-hl — before and after</title>
+<style>
+  :root {
+    --page: #0b1120;
+    --panel: #121a2b;
+    --bar: #1a2438;
+    --fg: #a9b1d6;   /* tokyonight's own terminal foreground */
+    --muted: #6f7c93;
+    --edge: #1f2a3f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 44px 40px 36px;
+    background: var(--page);
+    color: var(--fg);
+    font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 {
+    margin: 0 0 10px;
+    font: 700 30px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: -0.5px;
+    color: #eef1f6;
+  }
+  .lede { margin: 0 0 34px; max-width: 62ch; color: #98a3b8; }
+  .lede code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.92em; color: #b9c2d4; white-space: nowrap; }
+  .label {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 0 0 10px; padding-left: 2px;
+  }
+  .label b { font-size: 11px; letter-spacing: 1.6px; color: var(--muted); font-weight: 500; }
+  .label span {
+    font: 600 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: #dfe4ee;
+  }
+  .label em { font-style: normal; font-size: 12px; color: var(--muted); }
+  .win {
+    border: 1px solid var(--edge);
+    border-radius: 11px;
+    overflow: hidden;
+    background: var(--panel);
+    margin-bottom: 30px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+  }
+  .bar {
+    display: flex; align-items: center;
+    height: 34px; padding: 0 14px;
+    background: var(--bar);
+    border-bottom: 1px solid var(--edge);
+  }
+  .dots { display: flex; gap: 7px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .bar span {
+    margin-left: auto;
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: #5d6a80;
+  }
+  pre {
+    margin: 0;
+    padding: 22px 24px 24px;
+    overflow-x: auto;
+    font: 13.5px/1.62 ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    color: var(--fg);
+    tab-size: 2;
+  }
+  pre .d { color: var(--fg); }
+  pre .b { font-weight: 700; }
+  pre .u { text-decoration: underline; }
+  pre .dim { opacity: 0.62; }
+  ul.key {
+    display: flex; flex-wrap: wrap; gap: 9px 16px;
+    margin: 4px 0 0; padding: 0; list-style: none;
+    font: 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: #8e99ad;
+  }
+  ul.key li { display: flex; align-items: center; gap: 7px; }
+  ul.key i { width: 9px; height: 9px; border-radius: 2px; display: block; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>claude-hl</h1>
+    <p class="lede">
+      The same Claude Code session, seen through a plain terminal and through claude-hl.
+      Nothing about Claude Code changes; only the colours of what it prints.
+      Second pane is the <code>tokyonight</code> theme.
+    </p>
+
+    <div class="label"><b>BEFORE</b><span>claude</span></div>
+    <div class="win">
+      <div class="bar">
+        <div class="dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <span>claude — 120×32</span>
+      </div>
+      <pre><span class="d">╭──────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<span class="d">│ &gt; ship the release: run the checks, then commit and tag it                                       │</span>
+<span class="d">╰──────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
+&nbsp;
+<span class="d">⏺ Bash(git status --short &amp;&amp; git diff --stat)</span>
+<span style="color:#999999">  ⎿   M src/main.rs</span>
+<span style="color:#999999">     1 file changed, 24 insertions(+), 3 deletions(-)</span>
+&nbsp;
+<span class="d">⏺ Bash(cargo test --release -- --nocapture 2&gt;&amp;1 | tail -n 5)</span>
+<span style="color:#999999">  ⎿  error[E0308]: mismatched types --&gt; src/main.rs:42:7</span>
+<span style="color:#999999">     warning: unused variable `n`</span>
+<span style="color:#999999">     test result: FAILED. 22 passed; 1 failed; finished in 0.38s</span>
+&nbsp;
+<span class="d">⏺ Read(src/main.rs)</span>
+<span style="color:#999999">  ⎿  Read 120 lines</span>
+&nbsp;
+<span class="d">⏺ One borrow slipped into the release path. Fixed it, then ran the suite again.</span>
+&nbsp;
+<span class="d">⏺ Bash(cargo test --release 2&gt;&amp;1 | tail -n 3)</span>
+<span style="color:#999999">  ⎿  test result: ok. 23 passed; 0 failed; finished in 0.42s</span>
+&nbsp;
+<span class="d">⏺ Bash(git commit -m &quot;release: v1.2.0&quot; --no-verify &amp;&amp; git tag v1.2.0)</span>
+<span style="color:#999999">  ⎿  [main 4f21ac9] release: v1.2.0</span>
+<span style="color:#999999">      1 file changed, 24 insertions(+), 3 deletions(-)</span>
+&nbsp;
+<span class="d">⏺ Tagged. </span><span style="color:#b1b9f9">v1.2.0</span><span class="d"> is on </span><span style="color:#b1b9f9">main</span><span class="d">; push with </span><span style="color:#b1b9f9">git push --follow-tags</span><span class="d"> when you&#x27;re ready.</span>
+<span class="d">  The build log is in target/release/build.log and the notes are in ~/.config/app.toml.</span>
+<span class="d">  See https://docs.rs/libc if the linker complains, and make sure the next step is a clean tree.</span>
+&nbsp;
+<span style="color:#999999">✻ Shipped for 14s</span></pre>
+    </div>
+
+    <div class="label"><b>AFTER</b><span>claude-hl</span><em>same bytes, second pass painted</em></div>
+    <div class="win">
+      <div class="bar">
+        <div class="dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+        <span>claude-hl — 120×32</span>
+      </div>
+      <pre><span class="dim" style="color:#565f89">╭──────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<span class="dim" style="color:#565f89">│</span><span class="d"> &gt; ship the release: run the checks, then commit and tag it                                       </span><span class="dim" style="color:#565f89">│</span>
+<span class="dim" style="color:#565f89">╰──────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
+&nbsp;
+<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">status</span><span class="d"> </span><span style="color:#bb9af7">--short</span><span class="d"> </span><span style="color:#7dcfff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">diff</span><span class="d"> </span><span style="color:#bb9af7">--stat</span><span class="d">)</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">   </span><span style="color:#e0af68">M</span><span style="color:#737aa2"> </span><span style="color:#c0caf5">src/main.rs</span>
+<span style="color:#737aa2">     </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> file changed, </span><span style="color:#ff9e64">24</span><span style="color:#737aa2"> insertions(+), </span><span style="color:#ff9e64">3</span><span style="color:#737aa2"> deletions(-)</span>
+&nbsp;
+<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">cargo</span><span class="d"> </span><span style="color:#73daca">test</span><span class="d"> </span><span style="color:#bb9af7">--release</span><span class="d"> </span><span style="color:#bb9af7">--</span><span class="d"> </span><span style="color:#bb9af7">--nocapture</span><span class="d"> </span><span style="color:#7dcfff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#7dcfff">|</span><span class="d"> </span><span class="b" style="color:#7aa2f7">tail</span><span class="d"> </span><span style="color:#bb9af7">-n</span><span class="d"> </span><span style="color:#ff9e64">5</span><span class="d">)</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  </span><span style="color:#f7768e">error</span><span style="color:#737aa2">[E0308]: mismatched types --&gt; </span><span style="color:#c0caf5">src/main.rs</span><span style="color:#ff9e64">:42:7</span>
+<span style="color:#737aa2">     </span><span style="color:#e0af68">warning</span><span style="color:#737aa2">: unused variable `n`</span>
+<span style="color:#737aa2">     test result: </span><span style="color:#f7768e">FAILED</span><span style="color:#737aa2">. </span><span style="color:#ff9e64">22</span><span style="color:#737aa2"> </span><span style="color:#9ece6a">passed</span><span style="color:#737aa2">; </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> </span><span style="color:#f7768e">failed</span><span style="color:#737aa2">; finished in </span><span style="color:#ff9e64">0.38s</span>
+&nbsp;
+<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Read</span><span class="d">(</span><span style="color:#c0caf5">src/main.rs</span><span class="d">)</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  Read </span><span style="color:#ff9e64">120</span><span style="color:#737aa2"> lines</span>
+&nbsp;
+<span class="d">⏺ One borrow slipped into the release path. Fixed it, then ran the suite again.</span>
+&nbsp;
+<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">cargo</span><span class="d"> </span><span style="color:#73daca">test</span><span class="d"> </span><span style="color:#bb9af7">--release</span><span class="d"> </span><span style="color:#7dcfff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#7dcfff">|</span><span class="d"> </span><span class="b" style="color:#7aa2f7">tail</span><span class="d"> </span><span style="color:#bb9af7">-n</span><span class="d"> </span><span style="color:#ff9e64">3</span><span class="d">)</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  test result: </span><span style="color:#9ece6a">ok</span><span style="color:#737aa2">. </span><span style="color:#ff9e64">23</span><span style="color:#737aa2"> </span><span style="color:#9ece6a">passed</span><span style="color:#737aa2">; </span><span style="color:#ff9e64">0</span><span style="color:#737aa2"> </span><span style="color:#f7768e">failed</span><span style="color:#737aa2">; finished in </span><span style="color:#ff9e64">0.42s</span>
+&nbsp;
+<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">commit</span><span class="d"> </span><span style="color:#bb9af7">-m</span><span class="d"> </span><span style="color:#e0af68">&quot;release: v1.2.0&quot;</span><span class="d"> </span><span style="color:#bb9af7">--no-verify</span><span class="d"> </span><span style="color:#7dcfff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">tag</span><span class="d"> </span><span style="color:#ff9e64">v1.2.0</span><span class="d">)</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  [main 4f21ac9] release: v1.2.0</span>
+<span style="color:#737aa2">      </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> file changed, </span><span style="color:#ff9e64">24</span><span style="color:#737aa2"> insertions(+), </span><span style="color:#ff9e64">3</span><span style="color:#737aa2"> deletions(-)</span>
+&nbsp;
+<span class="d">⏺ Tagged. </span><span style="color:#9d7cd8">v1.2.0</span><span class="d"> is on </span><span style="color:#9d7cd8">main</span><span class="d">; push with </span><span class="b" style="color:#7aa2f7">git</span><span style="color:#9d7cd8"> </span><span style="color:#73daca">push</span><span style="color:#9d7cd8"> </span><span style="color:#bb9af7">--follow-tags</span><span class="d"> when you&#x27;re ready.</span>
+<span class="d">  The build log is in </span><span style="color:#c0caf5">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#c0caf5">~/.config/app.toml</span><span class="d">.</span>
+<span class="d">  See </span><span class="u" style="color:#7aa2f7">https://docs.rs/libc</span><span class="d"> if the linker complains, and make sure the next step is a clean tree.</span>
+&nbsp;
+<span style="color:#737aa2">✻ Shipped for </span><span style="color:#ff9e64">14s</span></pre>
+    </div>
+
+    <ul class="key">
+      <li><i style="background:#7aa2f7"></i>command</li>
+      <li><i style="background:#73daca"></i>subcommand</li>
+      <li><i style="background:#bb9af7"></i>flag</li>
+      <li><i style="background:#e0af68"></i>string</li>
+      <li><i style="background:#7dcfff"></i>operator</li>
+      <li><i style="background:#c0caf5"></i>path</li>
+      <li><i style="background:#ff9e64"></i>number</li>
+      <li><i style="background:#bb9af7"></i>tool</li>
+      <li><i style="background:#f7768e"></i>error</li>
+      <li><i style="background:#9ece6a"></i>pass</li>
+      <li><i style="background:#9d7cd8"></i>inline code (remapped)</li>
+      <li><i style="background:#737aa2"></i>chrome</li>
+    </ul>
+  </div>
+</body>
+</html>
