@@ -4,9 +4,12 @@
 //!   claude-hl [args passed to claude...]
 //!   CLAUDE_HL_CMD=codex claude-hl        # wrap something else
 //!   CLAUDE_HL_THEME=rose claude-hl       # rose | catppuccin | tokyonight | dracula | gruvbox | nord (default: codex)
+//!   CLAUDE_HL_COLORS=cmd=89b4fa,num=fab387 claude-hl   # override single slots of the theme
+//!   CLAUDE_HL_COMMANDS="bash sh -make" claude-hl        # add words to the vocabulary, `-word` removes
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   claude-hl --selftest                 # print sample highlighted text
 //!   claude-hl --themes                   # preview every theme
+//!   claude-hl --version                  # wrapper version (everything else passes through)
 //!
 //! How it works: the child's raw output is passed through untouched while a
 //! small VT emulator mirrors the screen (cursor, cell grid, attributes).
@@ -20,13 +23,14 @@ use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::Write;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
 
 // ---- palette ---------------------------------------------------------------
 
 struct Theme {
     cmd: &'static str, sub: &'static str, flag: &'static str, string: &'static str, path: &'static str, op: &'static str,
+    num: &'static str, var: &'static str, url: &'static str, comment: &'static str,
     /// default foreground remaps (from, to), see `remaps()`
     remap: &'static [(&'static str, &'static str)],
 }
@@ -45,52 +49,58 @@ const NVIM_COMMENT: &str = "7a9a9a";
 
 const THEME_ROSE: Theme = Theme {
     cmd: "9ccfd8", sub: "c4a7e7", flag: "ebbcba", string: "f6c177", path: "e0def4", op: "9ccfd8",
+    num: "ea9a97", var: "eb6f92", url: "9ccfd8", comment: "6e6a86",
     remap: &[(STOCK_CODESPAN, "c4a7e7"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CODEX: Theme = Theme {
     cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
+    num: "d19a66", var: "98c379", url: "6fb3ff", comment: "7a9a9a",
     remap: &[(STOCK_CODESPAN, "e5c07b"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CATPPUCCIN: Theme = Theme {
     cmd: "89b4fa", sub: "94e2d5", flag: "f5c2e7", string: "f9e2af", path: "cdd6f4", op: "89dceb",
+    num: "fab387", var: "a6e3a1", url: "89b4fa", comment: "6c7086",
     remap: &[(STOCK_CODESPAN, "cba6f7"), (STOCK_SECONDARY, "7f849c")],
 };
 const THEME_TOKYO: Theme = Theme {
     cmd: "7aa2f7", sub: "73daca", flag: "bb9af7", string: "e0af68", path: "c0caf5", op: "7dcfff",
+    num: "ff9e64", var: "9ece6a", url: "7aa2f7", comment: "565f89",
     remap: &[(STOCK_CODESPAN, "9d7cd8"), (STOCK_SECONDARY, "737aa2")],
 };
 const THEME_DRACULA: Theme = Theme {
     cmd: "8be9fd", sub: "50fa7b", flag: "ff79c6", string: "f1fa8c", path: "f8f8f2", op: "bd93f9",
+    num: "ffb86c", var: "bd93f9", url: "8be9fd", comment: "6272a4",
     remap: &[(STOCK_CODESPAN, "bd93f9"), (STOCK_SECONDARY, "6272a4")],
 };
 const THEME_GRUVBOX: Theme = Theme {
     cmd: "83a598", sub: "8ec07c", flag: "d3869b", string: "fabd2f", path: "ebdbb2", op: "fe8019",
+    num: "fe8019", var: "b8bb26", url: "83a598", comment: "928374",
     remap: &[(STOCK_CODESPAN, "b8bb26"), (STOCK_SECONDARY, "928374")],
 };
 const THEME_NORD: Theme = Theme {
     cmd: "88c0d0", sub: "8fbcbb", flag: "b48ead", string: "ebcb8b", path: "eceff4", op: "81a1c1",
+    num: "d08770", var: "a3be8c", url: "88c0d0", comment: "616e88",
     remap: &[(STOCK_CODESPAN, "b48ead"), (STOCK_SECONDARY, "616e88")],
 };
 
 const THEME_NAMES: &[&str] = &["codex", "rose", "catppuccin", "tokyonight", "dracula", "gruvbox", "nord"];
 
-/// Colour classes; index 0 = "no override".
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Colour classes; index 0 = "no override". Remap codes start at 16.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
-enum Color { None = 0, Cmd, Sub, Flag, Str, Path, Op }
+#[allow(dead_code)]
+enum Color { None = 0, Cmd, Sub, Flag, Str, Path, Op, Num, Var, Url, Comment }
+const NCOLORS: usize = 11;
+const REMAP_BASE: u8 = 16;
 
-fn rgb(h: &str) -> String {
+/// `38;2;r;g;b` for a hex colour (SGR params, no ESC).
+fn fg_params(h: &str) -> String {
     let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(255);
-    format!("\x1b[38;2;{};{};{}m", c(0), c(2), c(4))
+    format!("38;2;{};{};{}", c(0), c(2), c(4))
 }
 
-/// like `rgb`, but bold too; used for the command word
-fn rgb_bold(h: &str) -> String {
-    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(255);
-    format!("\x1b[1;38;2;{};{};{}m", c(0), c(2), c(4))
-}
+fn valid_hex(h: &str) -> bool { h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()) }
 
-/// SGR strings indexed by Color.
 fn theme() -> &'static Theme {
     match std::env::var("CLAUDE_HL_THEME").as_deref() {
         Ok("rose") => &THEME_ROSE,
@@ -99,53 +109,74 @@ fn theme() -> &'static Theme {
         Ok("dracula") => &THEME_DRACULA,
         Ok("gruvbox") => &THEME_GRUVBOX,
         Ok("nord") => &THEME_NORD,
+        Ok(other) if !other.is_empty() && other != "codex" => {
+            eprintln!("claude-hl: unknown theme {other:?}, using codex (try --themes)");
+            &THEME_CODEX
+        }
         _ => &THEME_CODEX,
     }
 }
 
-fn palette() -> &'static [String; 7] {
-    static P: OnceLock<[String; 7]> = OnceLock::new();
+/// SGR params (no ESC/`m`) indexed by Color: the command word is bold, URLs
+/// underlined, comments dim. `CLAUDE_HL_COLORS=slot=rrggbb,...` overrides
+/// single slots of the chosen theme.
+fn palette() -> &'static [String; NCOLORS] {
+    static P: OnceLock<[String; NCOLORS]> = OnceLock::new();
     P.get_or_init(|| {
         let t = theme();
-        [String::new(), rgb_bold(t.cmd), rgb(t.sub), rgb(t.flag), rgb(t.string), rgb(t.path), rgb(t.op)]
+        let mut hex = [t.cmd, t.sub, t.flag, t.string, t.path, t.op, t.num, t.var, t.url, t.comment];
+        const SLOTS: [&str; 10] = ["cmd", "sub", "flag", "string", "path", "op", "num", "var", "url", "comment"];
+        if let Ok(spec) = std::env::var("CLAUDE_HL_COLORS") {
+            for pair in spec.split(',') {
+                let Some((k, v)) = pair.trim().split_once('=') else { continue };
+                let v = v.trim().trim_start_matches('#');
+                match (SLOTS.iter().position(|s| *s == k.trim()), valid_hex(v)) {
+                    (Some(i), true) => hex[i] = Box::leak(v.to_string().into_boxed_str()),
+                    _ => eprintln!("claude-hl: ignoring CLAUDE_HL_COLORS entry {pair:?} (slots: {})", SLOTS.join(" ")),
+                }
+            }
+        }
+        let style = |i: usize| match i { 0 => "1;", 8 => "4;", 9 => "2;", _ => "" };
+        let mut p: [String; NCOLORS] = Default::default();
+        for i in 0..10 { p[i + 1] = format!("{}{}", style(i), fg_params(hex[i])); }
+        p
     })
 }
 
 /// Foreground remaps: any cell the app drew in the first colour is shown in
 /// the second. The theme supplies defaults; `CLAUDE_HL_REMAP=rrggbb=rrggbb,...`
 /// adds to or overrides them (`CLAUDE_HL_REMAP=` empty disables all).
-/// Returns (exact SGR fg params to match, SGR to emit).
+/// Returns (exact SGR fg params to match, SGR params to emit).
 fn remaps() -> &'static Vec<(String, String)> {
     static R: OnceLock<Vec<(String, String)>> = OnceLock::new();
     R.get_or_init(|| {
         let mut v: Vec<(String, String)> = Vec::new();
-        let fg = |h: &str| {
-            let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
-            format!("38;2;{};{};{}", c(0), c(2), c(4))
-        };
-        let env = std::env::var("CLAUDE_HL_REMAP").ok();
-        if env.is_none() {
-            for (from, to) in theme().remap { v.push((fg(from), rgb(to))); }
-        }
-        if let Some(spec) = env {
-            for (from, to) in theme().remap { v.push((fg(from), rgb(to))); }
+        for (from, to) in theme().remap { v.push((fg_params(from), fg_params(to))); }
+        if let Ok(spec) = std::env::var("CLAUDE_HL_REMAP") {
+            if spec.trim().is_empty() { v.clear(); return v; }
             for pair in spec.split(',') {
                 let Some((from, to)) = pair.trim().split_once('=') else { continue };
                 let (from, to) = (from.trim().trim_start_matches('#'), to.trim().trim_start_matches('#'));
-                if from.len() != 6 || to.len() != 6 { continue; }
-                let key = fg(from);
-                if let Some(e) = v.iter_mut().find(|(k, _)| *k == key) { e.1 = rgb(to); }
-                else if v.len() < 200 { v.push((key, rgb(to))); }
+                if !valid_hex(from) || !valid_hex(to) { continue; }
+                let key = fg_params(from);
+                if let Some(e) = v.iter_mut().find(|(k, _)| *k == key) { e.1 = fg_params(to); }
+                else if v.len() < 200 { v.push((key, fg_params(to))); }
             }
-            if spec.trim().is_empty() { v.clear(); }
         }
         v
     })
 }
 
-/// SGR string for a colour code.
+/// SGR params for a colour code.
 fn code_sgr(code: u8) -> &'static str {
-    if code < 16 { &palette()[code as usize] } else { &remaps()[code as usize - 16].1 }
+    if code < REMAP_BASE { &palette()[code as usize] } else { &remaps()[(code - REMAP_BASE) as usize].1 }
+}
+
+/// The fg Claude Code draws inline code in; a cell in this colour is
+/// definitely code, so the tokenizer can be generous there.
+fn codespan_fg() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| fg_params(STOCK_CODESPAN))
 }
 
 // ---- vocabulary ------------------------------------------------------------
@@ -161,7 +192,13 @@ sudo doas nohup just pytest ruff mypy poetry pipx uvx conda mvn gradle dotnet \
 swift ruby gem bundle rake rspec php composer psql mysql sqlite3 redis-cli \
 mongosh systemctl journalctl launchctl xcodebuild xcrun flutter dart adb \
 ffmpeg pandoc openssl gpg shellcheck protoc ansible vagrant nix zig perl lua \
-gcc clang ninja bazel";
+gcc clang ninja bazel \
+bash sh zsh fish exec exit man diff patch du df sleep time watch bat eza tree stat \
+rustup nvm fnm pm2 podman k9s minikube kind htop nc dig ping ssh-keygen base64 \
+shasum sha256sum xxd hyperfine tokei cloc fzf zoxide code cursor pbcopy pbpaste \
+xdg-open turbo nx lerna webpack esbuild biome prisma wrangler vercel netlify \
+flyctl heroku supabase firebase ngrok mise asdf direnv gdb lldb valgrind strace \
+mkcert caddy certbot crontab screen zellij";
 
 /// tools whose bare-word args are subcommands; for others (node, cat, cd...)
 /// only flags/paths/strings count, so prose like "node here" stays plain
@@ -169,17 +206,25 @@ const SUBCMD_TOOLS: &str = "git gh npm npx pnpm yarn bun bunx deno uv pip pip3 g
 dnf pacman docker docker-compose kubectl helm terraform aws gcloud az claude \
 codex gemini tmux make jq tsc next vite \
 sudo doas nohup poetry pipx conda mvn gradle dotnet swift gem bundle rake \
-composer systemctl journalctl launchctl flutter dart adb nix vagrant bazel openssl";
+composer systemctl journalctl launchctl flutter dart adb nix vagrant bazel openssl \
+man rustup nvm fnm pm2 podman minikube kind turbo nx lerna prisma wrangler vercel \
+netlify flyctl heroku supabase firebase mise asdf direnv crontab";
 
 /// prefix runners: a known command word right after them re-anchors the
 /// highlight, so `sudo systemctl ...` paints systemctl as a command again
-const CHAIN_TOOLS: &str = "sudo doas env xargs nohup";
+const CHAIN_TOOLS: &str = "sudo doas env xargs nohup time watch exec";
 
 const STOP_WORDS: &str = "and or then to the a an in on for with is it that this if of at by from so but \
 you we i will can should after before when do not into was are has have your our";
 
+/// text right before a command that marks it as a command line rather than
+/// prose (Claude Code's tool-call recap, a shell prompt)
+const RUNNER_PREFIXES: &[&str] = &["Ran", "Run", "Running", "Bash(", "$", "❯", "›"];
+
 /// bare words accepted after the command (e.g. `push origin main`)
 const MAX_SUB: usize = 3;
+/// in prose, bare non-subcommand words tolerated before giving up
+const MAX_BARE: usize = 3;
 
 struct Vocab {
     commands: HashSet<&'static str>,
@@ -190,26 +235,49 @@ struct Vocab {
 
 fn vocab() -> &'static Vocab {
     static V: OnceLock<Vocab> = OnceLock::new();
-    V.get_or_init(|| Vocab {
-        commands: COMMANDS.split_whitespace().collect(),
-        subcmd_tools: SUBCMD_TOOLS.split_whitespace().collect(),
-        chain_tools: CHAIN_TOOLS.split_whitespace().collect(),
-        stop_words: STOP_WORDS.split_whitespace().collect(),
+    V.get_or_init(|| {
+        let mut v = Vocab {
+            commands: COMMANDS.split_whitespace().collect(),
+            subcmd_tools: SUBCMD_TOOLS.split_whitespace().collect(),
+            chain_tools: CHAIN_TOOLS.split_whitespace().collect(),
+            stop_words: STOP_WORDS.split_whitespace().collect(),
+        };
+        // CLAUDE_HL_COMMANDS="bash sh -make": `word` adds, `-word` removes;
+        // `word:sub` also accepts bare subcommands after it
+        if let Ok(spec) = std::env::var("CLAUDE_HL_COMMANDS") {
+            for w in spec.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()) {
+                if let Some(rm) = w.strip_prefix('-') {
+                    v.commands.remove(rm); v.subcmd_tools.remove(rm); v.chain_tools.remove(rm);
+                    continue;
+                }
+                let (word, sub) = match w.split_once(':') { Some((a, "sub")) => (a, true), _ => (w, false) };
+                let word: &'static str = Box::leak(word.to_string().into_boxed_str());
+                v.commands.insert(word);
+                if sub { v.subcmd_tools.insert(word); }
+            }
+        }
+        v
     })
 }
 
 // ---- tokenizer -------------------------------------------------------------
 
-#[derive(PartialEq, Clone, Copy)]
-enum Kind { Ws, Str, Op, Flag, Path, Sub, Num }
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum Kind { Ws, Str, Chain, Redirect, Flag, Path, Sub, Word, Num, Var, Url, Comment }
 
 fn is_ws(b: u8) -> bool { b == b' ' || b == b'\t' }
 fn is_space(b: u8) -> bool { matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) }
 fn is_word(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'_' }
 /// chars that may not precede a command word
 fn is_cmd_glue(b: u8) -> bool { is_word(b) || matches!(b, b'/' | b'.' | b'@' | b'~' | b'-') }
-fn is_path_mark(b: u8) -> bool { matches!(b, b'/' | b'.' | b'~' | b'=' | b':' | b'@' | b'$') }
+fn is_path_mark(b: u8) -> bool { matches!(b, b'/' | b'.' | b'~' | b'=' | b':' | b'@' | b'*') }
 fn at_boundary(t: &[u8], i: usize) -> bool { i >= t.len() || is_space(t[i]) }
+fn is_sentence_punct(b: u8) -> bool { matches!(b, b'.' | b',' | b';' | b':' | b')') }
+/// end of a shell word: whitespace or a closing backtick
+fn word_end(t: &[u8], mut j: usize) -> usize {
+    while j < t.len() && !is_space(t[j]) && t[j] != b'`' { j += 1; }
+    j
+}
 
 /// Match one argument token at `i`. Returns (kind, end).
 fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
@@ -235,10 +303,25 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
             return Some((Kind::Str, i + 1 + k + 1));
         }
     }
-    for op in [&b"&&"[..], b"||", b"|", b";", b"2>&1", b">>", b">", b"<"] {
-        if t[i..].starts_with(op) && at_boundary(t, i + op.len()) {
-            return Some((Kind::Op, i + op.len()));
-        }
+    // operators may be glued to what follows (`grep x|wc`, `2>/dev/null`,
+    // `<<'EOF'`) as long as the next char is not another operator char
+    let op_end = |j: usize| at_boundary(t, j) || !matches!(t[j], b'>' | b'<' | b'&' | b'|' | b';');
+    for op in [&b"&&"[..], b"||", b"|", b";"] {
+        let j = i + op.len();
+        if t[i..].starts_with(op) && (if op == b";" { at_boundary(t, j) } else { op_end(j) }) { return Some((Kind::Chain, j)); }
+    }
+    for op in [&b"2>&1"[..], b"&>", b"2>", b">>", b">", b"<<", b"<"] {
+        let j = i + op.len();
+        if t[i..].starts_with(op) && op_end(j) { return Some((Kind::Redirect, j)); }
+    }
+    if b == b'#' && (i + 1 >= n || is_space(t[i + 1])) {
+        let mut j = i;
+        while j < n && t[j] != b'`' { j += 1; }
+        return Some((Kind::Comment, j));
+    }
+    if b == b'$' { return Some((Kind::Var, word_end(t, i + 1))); }
+    for scheme in [&b"http://"[..], b"https://", b"ssh://", b"git@", b"file://", b"www."] {
+        if t[i..].starts_with(scheme) { return Some((Kind::Url, word_end(t, i))); }
     }
     if b == b'-' {
         let mut j = i + 1;
@@ -246,10 +329,8 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
         if j < n && t[j].is_ascii_alphabetic() {
             j += 1;
             while j < n && (is_word(t[j]) || t[j] == b'-') { j += 1; }
-            if j < n && t[j] == b'=' {
-                j += 1;
-                while j < n && !is_space(t[j]) { j += 1; }
-            }
+            // `--flag=value`: the flag ends after `=`, the value is its own token
+            if j < n && t[j] == b'=' { j += 1; }
             return Some((Kind::Flag, j));
         }
         // numeric flags: `tail -20`, `head -5`
@@ -258,27 +339,41 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
             while k < n && t[k].is_ascii_digit() { k += 1; }
             if at_boundary(t, k) { return Some((Kind::Flag, k)); }
         }
-        if j == i + 2 && at_boundary(t, j) { return Some((Kind::Flag, j)); }
+        // `--` and `-` on their own (`cargo test -- --nocapture`, `cd -`)
+        if at_boundary(t, j) { return Some((Kind::Flag, j)); }
+    }
+    // `chmod +x`, `date +%s`
+    if b == b'+' && i + 1 < n && !is_space(t[i + 1]) { return Some((Kind::Flag, word_end(t, i + 1))); }
+    // numbers, versions, sizes, durations: 5  1.2.0  v1.2.0  10s  3.5GB  80%
+    if b.is_ascii_digit() || (b == b'v' && i + 1 < n && t[i + 1].is_ascii_digit()) {
+        let j = word_end(t, i);
+        // sentence punctuation stays in the token; `spans` strips it
+        let body_end = if j - i > 1 && is_sentence_punct(t[j - 1]) { j - 1 } else { j };
+        let body = &t[i + (b == b'v') as usize..body_end];
+        let numeric = !body.is_empty() && body.iter().all(|&c| c.is_ascii_digit() || matches!(c, b'.' | b'%' | b'k' | b'K' | b'm' | b'M' | b'g' | b'G' | b'B' | b's' | b'h' | b'd'));
+        if numeric { return Some((Kind::Num, j)); }
     }
     {
-        let mut j = i;
-        let mut marked = false;
-        while j < n && !is_space(t[j]) && t[j] != b'`' {
-            if is_path_mark(t[j]) { marked = true; }
-            j += 1;
+        let j = word_end(t, i);
+        // `PORT=3000`, `GIT_SSH=...`: an environment assignment
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let k = i + t[i..j].iter().take_while(|&&c| is_word(c)).count();
+            if k < j && t[k] == b'=' { return Some((Kind::Var, j)); }
         }
-        if marked { return Some((Kind::Path, j)); }
+        // `size.` is a word plus a full stop, not a path; `x.txt.` still is
+        let body_end = if j - i > 1 && is_sentence_punct(t[j - 1]) { j - 1 } else { j };
+        if t[i..body_end].iter().any(|&c| is_path_mark(c)) { return Some((Kind::Path, j)); }
     }
     if b.is_ascii_lowercase() {
         let mut j = i + 1;
         while j < n && (t[j].is_ascii_lowercase() || t[j].is_ascii_digit() || t[j] == b'-') { j += 1; }
+        // `size.` at the end of a sentence: keep the punctuation in the token
+        // so `spans` sees it and ends the span there
+        if j < n && is_sentence_punct(t[j]) && at_boundary(t, j + 1) { j += 1; }
         return Some((Kind::Sub, j));
     }
-    if b.is_ascii_digit() {
-        let mut j = i + 1;
-        while j < n && t[j].is_ascii_digit() { j += 1; }
-        return Some((Kind::Num, j));
-    }
+    // other bare words (HEAD, Makefile, README); only trusted in code context
+    if is_word(b) { return Some((Kind::Word, word_end(t, i))); }
     None
 }
 
@@ -304,8 +399,20 @@ fn find_cmd(t: &[u8], from: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// Is the text right before `cs` a runner prefix (`Ran `, `$ `, ...)?
+fn has_runner_prefix(text: &str, cs: usize) -> bool {
+    let before = text[..cs].trim_end();
+    RUNNER_PREFIXES.iter().any(|p| before.ends_with(p))
+}
+
 /// Compute colour spans (byte ranges) for one line of text.
-fn spans(text: &str, out: &mut Vec<(usize, usize, Color)>) {
+///
+/// `code[b]` says byte `b` sits in a cell Claude Code drew as inline code.
+/// Inside code, or right after a runner prefix, the tokenizer is generous:
+/// bare words are arguments and `git status` alone is a command. In prose it
+/// demands evidence (a flag, path, string, operator or number), so "make
+/// sure", "go ahead" and "next step" stay plain.
+fn spans(text: &str, code: &[bool], out: &mut Vec<(usize, usize, Color)>) {
     let t = text.as_bytes();
     let v = vocab();
     let mut pos = 0;
@@ -313,49 +420,102 @@ fn spans(text: &str, out: &mut Vec<(usize, usize, Color)>) {
         let mut cmd = &text[cs..ce];
         let mark = out.len();
         out.push((cs, ce, Color::Cmd));
+        let in_code = |a: usize, b: usize| code.get(a..b).map_or(false, |c| c.iter().any(|&x| x));
+        let runner = has_runner_prefix(text, cs);
+        let cmd_in_code = in_code(cs, ce);
+        let strong = runner || cmd_in_code;
         let mut i = ce;
         let mut subs = 0;
         let mut nargs = 0;
-        let mut after_op = false;
+        let mut bare = 0; // prose-context bare words taken on trust so far
+        let mut after_eq = false;
+        let mut evidence = false;
+        let mut after: Option<Kind> = None; // Chain or Redirect just seen
         while let Some((kind, end)) = next_arg(t, i) {
             if kind == Kind::Ws { i = end; continue; }
+            // the closing backtick of inline code ends the command
+            if cmd_in_code && !in_code(i, end) { break; }
             let tok = &text[i..end];
-            if after_op && kind != Kind::Op {
-                if kind == Kind::Sub && v.commands.contains(tok) {
-                    out.push((i, end, Color::Cmd));
-                    cmd = tok;
-                    subs = 0;
-                    after_op = false;
+            // `--out=dist`: the word glued to a flag is its value, not a subcommand
+            if after_eq && matches!(kind, Kind::Sub | Kind::Word) {
+                after_eq = false;
+                out.push((i, end, Color::Path));
+                nargs += 1;
+                i = end;
+                continue;
+            }
+            after_eq = kind == Kind::Flag && tok.ends_with('=');
+            match after {
+                // `&& git ...`: only a new command may follow
+                Some(Kind::Chain) if !matches!(kind, Kind::Chain | Kind::Redirect) => {
+                    if matches!(kind, Kind::Sub | Kind::Word) && v.commands.contains(tok) {
+                        out.push((i, end, Color::Cmd));
+                        cmd = tok; subs = 0; after = None; evidence = true;
+                        i = end;
+                        continue;
+                    }
+                    // `&& ./run.sh`, `| $PAGER`: a script or variable runs next
+                    if kind == Kind::Path && (tok.starts_with("./") || tok.starts_with('/') || tok.starts_with('~'))
+                        || kind == Kind::Var
+                    {
+                        out.push((i, end, if kind == Kind::Var { Color::Var } else { Color::Path }));
+                        cmd = ""; subs = 0; after = None; evidence = true; nargs += 1;
+                        i = end;
+                        continue;
+                    }
+                    break;
+                }
+                // `> out.txt`, `<< 'EOF'`: a target, then back to normal
+                Some(Kind::Redirect) if !matches!(kind, Kind::Chain | Kind::Redirect) => {
+                    let color = match kind {
+                        Kind::Str => Color::Str, Kind::Var => Color::Var, Kind::Num => Color::Num,
+                        Kind::Comment | Kind::Flag => { break; }
+                        _ => Color::Path,
+                    };
+                    out.push((i, end, color));
+                    after = None; nargs += 1; evidence = true;
                     i = end;
                     continue;
                 }
-                break;
+                _ => {}
             }
             let color = match kind {
-                Kind::Sub => {
+                Kind::Sub | Kind::Word => {
                     // `sudo systemctl restart ...`: the runner hands off to a
                     // real command, so restart the highlight from there
                     if v.chain_tools.contains(cmd) && v.commands.contains(tok) {
                         out.push((i, end, Color::Cmd));
-                        cmd = tok;
-                        subs = 0;
-                        nargs += 1;
+                        cmd = tok; subs = 0; nargs += 1; evidence = true;
                         i = end;
                         continue;
                     }
-                    if v.stop_words.contains(tok) || subs >= MAX_SUB || !v.subcmd_tools.contains(cmd) { break; }
-                    subs += 1;
-                    Color::Sub
+                    if v.stop_words.contains(tok) { break; }
+                    let sub_ok = kind == Kind::Sub && v.subcmd_tools.contains(cmd) && subs < MAX_SUB;
+                    if sub_ok { subs += 1; Color::Sub }
+                    else if strong || in_code(i, end) { Color::Path }
+                    else {
+                        // prose: take a few bare words on trust; if no flag,
+                        // path or operator ever shows up the span is dropped
+                        bare += 1;
+                        if bare > MAX_BARE { break; }
+                        Color::Path
+                    }
                 }
                 Kind::Flag => Color::Flag,
                 Kind::Str => Color::Str,
-                Kind::Path | Kind::Num => Color::Path,
-                Kind::Op => { after_op = true; Color::Op }
+                Kind::Path => Color::Path,
+                Kind::Num => Color::Num,
+                Kind::Var => Color::Var,
+                Kind::Url => Color::Url,
+                Kind::Comment => Color::Comment,
+                Kind::Chain | Kind::Redirect => { after = Some(kind); Color::Op }
                 Kind::Ws => unreachable!(),
             };
+            // operators only count once something real follows them
+            if !matches!(kind, Kind::Sub | Kind::Word | Kind::Chain | Kind::Redirect) { evidence = true; }
             // a bare word followed by sentence punctuation ends the span
-            if matches!(kind, Kind::Sub | Kind::Path) && tok.len() > 1
-                && matches!(t[end - 1], b'.' | b',' | b';' | b':' | b')')
+            if matches!(kind, Kind::Sub | Kind::Word | Kind::Path | Kind::Num | Kind::Var) && tok.len() > 1
+                && is_sentence_punct(t[end - 1])
             {
                 out.push((i, end - 1, color));
                 nargs += 1;
@@ -366,8 +526,12 @@ fn spans(text: &str, out: &mut Vec<(usize, usize, Color)>) {
             nargs += 1;
             i = end;
         }
-        if nargs == 0 {
-            // bare command word in prose: leave it alone
+        // a trailing chain operator paints nothing on its own
+        if after == Some(Kind::Chain) || after == Some(Kind::Redirect) {
+            if let Some(last) = out.last() { if last.2 == Color::Op { i = last.0; out.pop(); nargs -= 1; } }
+        }
+        if nargs == 0 || (!strong && !evidence) {
+            // bare command word in prose, or `make sure`: leave it alone
             out.truncate(mark);
             pos = ce;
             continue;
@@ -378,7 +542,7 @@ fn spans(text: &str, out: &mut Vec<(usize, usize, Color)>) {
 
 // ---- attributes ------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, Debug)]
 struct Attr {
     fg: String, bg: String,
     bold: bool, dim: bool, italic: bool, underline: bool, blink: bool, inverse: bool, hidden: bool, strike: bool,
@@ -414,16 +578,22 @@ impl Attr {
         }
     }
 
-    /// One SGR that reproduces this attribute set from scratch.
+    /// One SGR that reproduces this attribute set from scratch. `fg_override`
+    /// is SGR params (e.g. `1;38;2;r;g;b`) that replace the cell's own fg.
     fn render(&self, fg_override: &str) -> String {
         let mut s = String::from("\x1b[0");
-        if self.bold { s.push_str(";1") } if self.dim { s.push_str(";2") } if self.italic { s.push_str(";3") }
-        if self.underline { s.push_str(";4") } if self.blink { s.push_str(";5") } if self.inverse { s.push_str(";7") }
-        if self.hidden { s.push_str(";8") } if self.strike { s.push_str(";9") }
-        if !self.fg.is_empty() { s.push(';'); s.push_str(&self.fg) }
+        if self.bold { s.push_str(";1") }
+        if self.dim { s.push_str(";2") }
+        if self.italic { s.push_str(";3") }
+        if self.underline { s.push_str(";4") }
+        if self.blink { s.push_str(";5") }
+        if self.inverse { s.push_str(";7") }
+        if self.hidden { s.push_str(";8") }
+        if self.strike { s.push_str(";9") }
         if !self.bg.is_empty() { s.push(';'); s.push_str(&self.bg) }
+        if !fg_override.is_empty() { s.push(';'); s.push_str(fg_override) }
+        else if !self.fg.is_empty() { s.push(';'); s.push_str(&self.fg) }
         s.push('m');
-        s.push_str(fg_override);
         s
     }
 }
@@ -610,7 +780,7 @@ impl Screen {
             if self.autowrap { self.col = 0; self.linefeed(); }
         }
         if self.col + w > self.cols {
-            if self.autowrap { self.col = 0; self.linefeed(); } else { self.col = self.cols - w; }
+            if self.autowrap { self.col = 0; self.linefeed(); } else { self.col = self.cols.saturating_sub(w); }
         }
         let row = self.row;
         let attr = self.attr.clone();
@@ -772,6 +942,7 @@ impl Screen {
                 match params.first().copied().unwrap_or(0) {
                     0 => { self.erase_cells(r, c, self.cols); self.erase_rows(r + 1, self.rows); }
                     1 => { self.erase_rows(0, r); self.erase_cells(r, 0, c + 1); }
+                    3 => {} // erase scrollback only: the visible screen is untouched
                     _ => self.erase_rows(0, self.rows),
                 }
                 self.pending_wrap = false;
@@ -827,6 +998,43 @@ impl Screen {
 
     // -- repaint -------------------------------------------------------------
 
+    /// Text of one row plus, per byte, the cell it came from and whether that
+    /// cell is inline code. `cell_of` has one extra entry mapping `text.len()`
+    /// to `cols`, so span ends can be looked up too.
+    fn row_text(&self, r: usize, text: &mut String, cell_of: &mut Vec<usize>, code: &mut Vec<bool>) {
+        text.clear(); cell_of.clear(); code.clear();
+        let cs = codespan_fg();
+        for (ci, cell) in self.grid[r].iter().enumerate() {
+            if cell.cont { continue; }
+            let start = text.len();
+            text.push(cell.ch);
+            if let Some(z) = &cell.zw { text.push_str(z); }
+            let is_code = cell.attr.fg == cs;
+            for _ in start..text.len() { cell_of.push(ci); code.push(is_code); }
+        }
+        cell_of.push(self.cols);
+    }
+
+    /// Colour code wanted for every cell of row `r`: remaps first, then the
+    /// tokenizer's spans on top, then wide-char continuations follow their head.
+    fn desired_row(&mut self, r: usize, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, code: &mut Vec<bool>) {
+        self.row_text(r, text, cell_of, code);
+        self.spans_buf.clear();
+        spans(text, code, &mut self.spans_buf);
+        desired.clear(); desired.resize(self.cols, 0);
+        let rm = remaps();
+        if !rm.is_empty() {
+            for (ci, cell) in self.grid[r].iter().enumerate() {
+                if let Some(k) = rm.iter().position(|(from, _)| *from == cell.attr.fg) { desired[ci] = REMAP_BASE + k as u8; }
+            }
+        }
+        for &(s, e, color) in &self.spans_buf {
+            let (cs, ce) = (cell_of[s], cell_of[e]);
+            for d in desired.iter_mut().take(ce).skip(cs) { *d = color as u8; }
+        }
+        for c in 1..self.cols { if self.grid[r][c].cont { desired[c] = desired[c - 1]; } }
+    }
+
     /// Emit repaint escapes for dirty rows. Returns bytes to append to stdout.
     fn repaint(&mut self, out: &mut Vec<u8>) {
         if (!self.enabled && !self.alt) || self.pending_wrap { return; }
@@ -834,45 +1042,24 @@ impl Screen {
         // char; injecting bytes there would corrupt it. Rows stay dirty and
         // paint on the next chunk.
         if self.pst != PState::Ground || !self.utf8.is_empty() { return; }
-        let mut text = String::new();
-        let mut cell_of: Vec<usize> = Vec::new(); // byte offset -> cell index
+        let (mut text, mut cell_of, mut code) = (String::new(), Vec::new(), Vec::new());
         let mut desired: Vec<u8> = Vec::new();
-        let rm = remaps();
         let mut wrote = false;
+        // unchanged cells between two runs cost less to rewrite than a
+        // cursor move plus a fresh SGR, so short gaps join the run
+        const GAP: usize = 3;
         for r in 0..self.rows {
             if !self.dirty[r] { continue; }
             self.dirty[r] = false;
-            text.clear(); cell_of.clear();
-            for (ci, cell) in self.grid[r].iter().enumerate() {
-                if cell.cont { continue; }
-                let start = text.len();
-                text.push(cell.ch);
-                if let Some(z) = &cell.zw { text.push_str(z); }
-                for _ in start..text.len() { cell_of.push(ci); }
-            }
-            cell_of.push(self.cols);
-            self.spans_buf.clear();
-            spans(&text, &mut self.spans_buf);
-            desired.clear(); desired.resize(self.cols, 0);
-            if !rm.is_empty() {
-                for (ci, cell) in self.grid[r].iter().enumerate() {
-                    if let Some(k) = rm.iter().position(|(from, _)| *from == cell.attr.fg) { desired[ci] = 16 + k as u8; }
-                }
-            }
-            for &(s, e, color) in &self.spans_buf {
-                let (cs, ce) = (cell_of[s], cell_of[e]);
-                for d in desired.iter_mut().take(ce).skip(cs) { *d = color as u8; }
-            }
-            // wide char continuation cells follow their head
-            for c in 1..self.cols { if self.grid[r][c].cont { desired[c] = desired[c - 1]; } }
+            self.desired_row(r, &mut desired, &mut text, &mut cell_of, &mut code);
+            let stale = |c: usize, row: &[Cell]| desired[c] != row[c].shown || row[c].cont;
             let mut c = 0;
             while c < self.cols {
-                if desired[c] == self.grid[r][c].shown || self.grid[r][c].cont { c += 1; continue; }
-                // run of cells to rewrite
+                if !stale(c, &self.grid[r]) { c += 1; continue; }
                 let start = c;
                 let mut last_attr: Option<(Rc<Attr>, u8)> = None;
                 let mut seg = String::new();
-                while c < self.cols && (desired[c] != self.grid[r][c].shown || self.grid[r][c].cont) {
+                loop {
                     let cell = &self.grid[r][c];
                     if !cell.cont {
                         let need = match &last_attr {
@@ -888,6 +1075,10 @@ impl Screen {
                     }
                     self.grid[r][c].shown = desired[c];
                     c += 1;
+                    if c >= self.cols { break; }
+                    if stale(c, &self.grid[r]) { continue; }
+                    let more = (c + 1..(c + 1 + GAP).min(self.cols)).any(|k| stale(k, &self.grid[r]));
+                    if !more { break; }
                 }
                 let _ = write!(out, "\x1b[{};{}H", r + 1, start + 1);
                 out.extend_from_slice(seg.as_bytes());
@@ -901,31 +1092,20 @@ impl Screen {
     }
 
     /// Debug/selftest: render the whole screen inline with colours.
-    fn render_inline(&self) -> String {
-        let pal = palette();
+    fn render_inline(&mut self) -> String {
         let mut s = String::new();
-        let mut spans_buf = Vec::new();
+        let (mut text, mut cell_of, mut code) = (String::new(), Vec::new(), Vec::new());
+        let mut desired: Vec<u8> = Vec::new();
         let last_row = (0..self.rows).rev().find(|&r| self.grid[r].iter().any(|c| c.ch != ' ')).map_or(0, |r| r + 1);
         for r in 0..last_row {
-            let mut text = String::new();
-            let mut cell_of = Vec::new();
-            for (ci, cell) in self.grid[r].iter().enumerate() {
-                if cell.cont { continue; }
-                let st = text.len(); text.push(cell.ch);
-                if let Some(z) = &cell.zw { text.push_str(z); }
-                for _ in st..text.len() { cell_of.push(ci); }
-            }
-            cell_of.push(self.cols);
-            spans_buf.clear(); spans(&text, &mut spans_buf);
-            let mut desired = vec![Color::None; self.cols];
-            for &(a, b, col) in &spans_buf { for d in desired.iter_mut().take(cell_of[b]).skip(cell_of[a]) { *d = col; } }
+            self.desired_row(r, &mut desired, &mut text, &mut cell_of, &mut code);
             let end = self.grid[r].iter().rposition(|c| c.ch != ' ').map_or(0, |i| i + 1);
-            let mut last: Option<(Rc<Attr>, Color)> = None;
+            let mut last: Option<(Rc<Attr>, u8)> = None;
             for c in 0..end {
                 let cell = &self.grid[r][c];
                 if cell.cont { continue; }
                 let need = match &last { Some((a, col)) => **a != *cell.attr || *col != desired[c], None => true };
-                if need { s.push_str(&cell.attr.render(&pal[desired[c] as usize])); last = Some((cell.attr.clone(), desired[c])); }
+                if need { s.push_str(&cell.attr.render(code_sgr(desired[c]))); last = Some((cell.attr.clone(), desired[c])); }
                 s.push(cell.ch);
                 if let Some(z) = &cell.zw { s.push_str(z); }
             }
@@ -933,13 +1113,21 @@ impl Screen {
         }
         s
     }
+
+    #[cfg(test)]
+    fn row_string(&self, r: usize) -> String {
+        self.grid[r].iter().filter(|c| !c.cont).map(|c| c.ch).collect::<String>().trim_end().to_string()
+    }
 }
 
 // ---- PTY plumbing ----------------------------------------------------------
 
 static WINCH: AtomicBool = AtomicBool::new(false);
+/// SIGTERM/SIGHUP received: leave the loop, restore the terminal, pass it on
+static QUIT: AtomicI32 = AtomicI32::new(0);
 
 extern "C" fn on_winch(_: libc::c_int) { WINCH.store(true, Ordering::SeqCst); }
+extern "C" fn on_quit(sig: libc::c_int) { QUIT.store(sig, Ordering::SeqCst); }
 
 fn winsize(fd: libc::c_int) -> Option<libc::winsize> {
     unsafe {
@@ -1037,10 +1225,22 @@ fn run(argv: &[String]) -> i32 {
     if pid == 0 {
         let mut ptrs: Vec<*const libc::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(std::ptr::null());
-        unsafe { libc::execvp(ptrs[0], ptrs.as_ptr()); libc::_exit(127); }
+        unsafe {
+            libc::execvp(ptrs[0], ptrs.as_ptr());
+            // only write(2) is safe here; the message goes to the pty, which
+            // the parent passes through to the terminal
+            let msg = format!("claude-hl: cannot run {:?}: {}\r\n", argv[0], std::io::Error::last_os_error());
+            libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const _, msg.len());
+            libc::_exit(127);
+        }
     }
     if isatty {
         unsafe { libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t); }
+    }
+    unsafe {
+        let h = on_quit as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, h);
+        libc::signal(libc::SIGHUP, h);
     }
 
     // cursor query after spawning: the child boots during the terminal
@@ -1067,6 +1267,8 @@ fn run(argv: &[String]) -> i32 {
     let mut out: Vec<u8> = Vec::with_capacity(131072);
     let mut watch_stdin = true;
     loop {
+        let q = QUIT.load(Ordering::SeqCst);
+        if q != 0 { unsafe { libc::kill(pid, q); } break; }
         if WINCH.swap(false, Ordering::SeqCst) {
             if let Some(w) = winsize(stdin) {
                 unsafe { libc::ioctl(master, libc::TIOCSWINSZ, &w); libc::kill(pid, libc::SIGWINCH); }
@@ -1131,6 +1333,7 @@ fn run(argv: &[String]) -> i32 {
     let w = unsafe { libc::waitpid(pid, &mut status, 0) };
     if w < 0 { return 0; }
     if libc::WIFEXITED(status) { return libc::WEXITSTATUS(status); }
+    if libc::WIFSIGNALED(status) { return 128 + libc::WTERMSIG(status); }
     1
 }
 
@@ -1138,17 +1341,27 @@ fn run(argv: &[String]) -> i32 {
 
 const SAMPLE: &str = "Ran git diff --stat && git status --short\r\n\
 Ran git diff -- crates/ts_checker/src/semantic/assignment.rs | sed -n '1,300p'\r\n\
+Ran cargo test --release -- --nocapture 2>&1 | tail -n 5\r\n\
+Ran git commit -m \"release: v1.2.0\" --no-verify && git tag v1.2.0\r\n\
 Run git status to see changes, then:\r\n\
-  git commit -m \"fix: pty filter\" --no-verify\r\n\
+  git push origin HEAD --force-with-lease=main   # after rebase\r\n\
   npm install --save-dev vitest and restart the server.\r\n\
   sudo systemctl restart nginx && journalctl -u nginx --since today\r\n\
-  pytest tests/test_auth.py -k \"login\" | tail -20\r\n\
+  pytest tests/test_auth.py -k \"login\" | tail -20 > /tmp/out.log\r\n\
+  docker run -it --rm -v $(pwd):/app -e PORT=3000 node:20 bash\r\n\
+  git clone https://github.com/rashedInt32/claude-hl && cd claude-hl && chmod +x build.sh\r\n\
 Use \x1b[38;2;95;179;217mclaude --rc \"my-project\"\x1b[39m from the project dir.\r\n\
+Tagged. \x1b[38;2;177;185;249mv1.2.0\x1b[39m is on \x1b[38;2;177;185;249mmain\x1b[39m; push with \x1b[38;2;177;185;249mgit push --follow-tags\x1b[39m when ready.\r\n\
+Let me make sure the build passes, then go ahead with the next step; run \x1b[38;2;177;185;249mnpm test\x1b[39m after.\r\n\
 Plain prose with the word node in it, and cd ~/Documents/codes/packages.\r\n\
 \x1b[1m● streamed:\x1b[22m Ran git\x1b[0m";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--version") {
+        println!("claude-hl {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.first().map(String::as_str) == Some("--themes") {
         // palette() is fixed per process, so preview each theme in a child
         let exe = std::env::current_exe().unwrap_or_else(|_| "claude-hl".into());
@@ -1172,4 +1385,227 @@ fn main() {
     let mut argv = vec![cmd];
     argv.extend(args);
     std::process::exit(run(&argv));
+}
+
+// ---- tests -----------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `[tok:Kind]` markup of what `spans` would paint, e.g. `[git:Cmd] [status:Sub]`.
+    fn paint_with(line: &str, code: &[bool]) -> String {
+        let mut v = Vec::new();
+        spans(line, code, &mut v);
+        let mut o = String::new();
+        let mut last = 0;
+        for (a, b, c) in v {
+            o.push_str(&line[last..a]);
+            o.push_str(&format!("[{}:{:?}]", &line[a..b], c));
+            last = b;
+        }
+        o.push_str(&line[last..]);
+        o
+    }
+    fn paint(line: &str) -> String { paint_with(line, &vec![false; line.len()]) }
+    /// like `paint`, but bytes in `code_range` count as inline code
+    fn paint_code(line: &str, code_range: std::ops::Range<usize>) -> String {
+        let mut code = vec![false; line.len()];
+        for b in code.iter_mut().take(code_range.end).skip(code_range.start) { *b = true; }
+        paint_with(line, &code)
+    }
+
+    #[test]
+    fn prose_with_tool_names_stays_plain() {
+        for line in [
+            "Let me make sure the build passes.",
+            "I'll go ahead and fix that, then go through the rest.",
+            "The next step is to check the bundle size.",
+            "The next step; run it again.",
+            "Plain prose with the word node in it.",
+            "We should open the file and cat images later.",
+            "git status",
+            "run npm test to check",
+            "git push origin HEAD",
+        ] {
+            assert_eq!(paint(line), line, "should stay plain: {line}");
+        }
+    }
+
+    #[test]
+    fn runner_prefix_marks_a_command_line() {
+        assert_eq!(paint("Ran git status --short"), "Ran [git:Cmd] [status:Sub] [--short:Flag]");
+        assert_eq!(paint("Ran git status"), "Ran [git:Cmd] [status:Sub]");
+        assert_eq!(paint("Run git status to see changes"), "Run [git:Cmd] [status:Sub] to see changes");
+        assert_eq!(paint("$ git push origin HEAD"), "$ [git:Cmd] [push:Sub] [origin:Sub] [HEAD:Path]");
+    }
+
+    #[test]
+    fn inline_code_is_trusted_and_ends_at_the_backtick() {
+        // "run npm test after." with `npm test` drawn as inline code
+        let line = "run npm test after.";
+        assert_eq!(paint_code(line, 4..12), "run [npm:Cmd] [test:Sub] after.");
+        let line = "push with git push --follow-tags when ready.";
+        assert_eq!(paint_code(line, 10..32), "push with [git:Cmd] [push:Sub] [--follow-tags:Flag] when ready.");
+    }
+
+    #[test]
+    fn prose_needs_evidence_but_gets_it_late() {
+        assert_eq!(paint("git push origin HEAD --force-with-lease=main   # after rebase"),
+            "[git:Cmd] [push:Sub] [origin:Sub] [HEAD:Path] [--force-with-lease=:Flag][main:Path]   [# after rebase:Comment]");
+        assert_eq!(paint("npm install --save-dev vitest and restart the server."),
+            "[npm:Cmd] [install:Sub] [--save-dev:Flag] [vitest:Sub] and restart the server.");
+        assert_eq!(paint("and cd ~/Documents/codes."), "and [cd:Cmd] [~/Documents/codes:Path].");
+    }
+
+    #[test]
+    fn operators_chain_and_redirect() {
+        assert_eq!(paint("sudo systemctl restart nginx && journalctl -u nginx"),
+            "[sudo:Cmd] [systemctl:Cmd] [restart:Sub] [nginx:Sub] [&&:Op] [journalctl:Cmd] [-u:Flag] [nginx:Sub]");
+        assert_eq!(paint("tail -20 > /tmp/out.log"), "[tail:Cmd] [-20:Flag] [>:Op] [/tmp/out.log:Path]");
+        assert_eq!(paint("cat <<'EOF' > x.txt"), "[cat:Cmd] [<<:Op]['EOF':Str] [>:Op] [x.txt:Path]");
+        assert_eq!(paint("make build && ./run.sh"), "[make:Cmd] [build:Sub] [&&:Op] [./run.sh:Path]");
+        assert_eq!(paint("cargo test 2>&1 | tail -n 5"), "[cargo:Cmd] [test:Sub] [2>&1:Op] [|:Op] [tail:Cmd] [-n:Flag] [5:Num]");
+        // a trailing operator (streamed line, or prose) paints nothing on its own
+        assert_eq!(paint("Ran git status &&"), "Ran [git:Cmd] [status:Sub] &&");
+        assert_eq!(paint("time cargo build --release"), "[time:Cmd] [cargo:Cmd] [build:Sub] [--release:Flag]");
+    }
+
+    #[test]
+    fn token_kinds() {
+        assert_eq!(paint("docker run -e PORT=3000 -v $(pwd):/app node:20"),
+            "[docker:Cmd] [run:Sub] [-e:Flag] [PORT=3000:Var] [-v:Flag] [$(pwd):/app:Var] [node:20:Path]");
+        assert_eq!(paint("cd $HOME/.config"), "[cd:Cmd] [$HOME/.config:Var]");
+        assert_eq!(paint("git clone https://github.com/x/y.git"), "[git:Cmd] [clone:Sub] [https://github.com/x/y.git:Url]");
+        assert_eq!(paint("git tag v1.2.0 && sleep 10s"), "[git:Cmd] [tag:Sub] [v1.2.0:Num] [&&:Op] [sleep:Cmd] [10s:Num]");
+        assert_eq!(paint("chmod +x build.sh"), "[chmod:Cmd] [+x:Flag] [build.sh:Path]");
+        assert_eq!(paint("cargo test -- --nocapture"), "[cargo:Cmd] [test:Sub] [--:Flag] [--nocapture:Flag]");
+        assert_eq!(paint("Ran cd -"), "Ran [cd:Cmd] [-:Flag]");
+        assert_eq!(paint("Ran ls *.rs"), "Ran [ls:Cmd] [*.rs:Path]");
+        assert_eq!(paint("Ran cargo build 2>/dev/null"), "Ran [cargo:Cmd] [build:Sub] [2>:Op][/dev/null:Path]");
+        assert_eq!(paint("Ran grep foo|wc -l"), "Ran [grep:Cmd] [foo:Path][|:Op][wc:Cmd] [-l:Flag]");
+        assert_eq!(paint("git commit -m \"fix: it\" --no-verify"), "[git:Cmd] [commit:Sub] [-m:Flag] [\"fix: it\":Str] [--no-verify:Flag]");
+    }
+
+    #[test]
+    fn sentence_punctuation_ends_the_span() {
+        assert_eq!(paint("Ran tail -n 5."), "Ran [tail:Cmd] [-n:Flag] [5:Num].");
+        assert_eq!(paint("Ran git push origin main, then wait."), "Ran [git:Cmd] [push:Sub] [origin:Sub] [main:Sub], then wait.");
+    }
+
+    fn screen(rows: usize, cols: usize, input: &str) -> Screen {
+        let mut sc = Screen::new(rows, cols);
+        sc.feed(input.as_bytes());
+        sc
+    }
+
+    #[test]
+    fn screen_writes_wraps_and_scrolls() {
+        let sc = screen(3, 5, "abc\r\ndefghij");
+        assert_eq!(sc.row_string(0), "abc");
+        assert_eq!(sc.row_string(1), "defgh");
+        assert_eq!(sc.row_string(2), "ij");
+        assert_eq!((sc.row, sc.col), (2, 2));
+        let sc = screen(2, 10, "one\r\ntwo\r\nthree");
+        assert_eq!((sc.row_string(0), sc.row_string(1)), ("two".into(), "three".into()));
+    }
+
+    #[test]
+    fn screen_cursor_and_erase() {
+        let mut sc = screen(3, 10, "hello world\x1b[1;7H\x1b[K");
+        assert_eq!(sc.row_string(0), "hello");
+        sc.feed(b"\x1b[3J"); // scrollback only: screen untouched
+        assert_eq!(sc.row_string(0), "hello");
+        sc.feed(b"\x1b[2J");
+        assert_eq!(sc.row_string(0), "");
+    }
+
+    #[test]
+    fn screen_scroll_region() {
+        let mut sc = screen(4, 10, "a\r\nb\r\nc\r\nd");
+        sc.feed(b"\x1b[2;3r\x1b[3;1H\n"); // region rows 2-3, cursor on row 3, LF scrolls the region
+        assert_eq!([sc.row_string(0), sc.row_string(1), sc.row_string(2), sc.row_string(3)], ["a", "c", "", "d"]);
+    }
+
+    #[test]
+    fn screen_alt_screen_round_trip() {
+        let mut sc = screen(2, 10, "main");
+        sc.feed(b"\x1b[?1049h");
+        assert_eq!(sc.row_string(0), "");
+        sc.feed(b"alt\x1b[?1049l");
+        assert_eq!(sc.row_string(0), "main");
+        assert!(!sc.alt);
+    }
+
+    #[test]
+    fn screen_wide_chars() {
+        let sc = screen(1, 6, "日本x");
+        assert!(sc.grid[0][1].cont && sc.grid[0][3].cont);
+        assert_eq!(sc.row_string(0), "日本x");
+        assert_eq!(sc.col, 5);
+        assert_eq!(char_width('a'), 1);
+        assert_eq!(char_width('日'), 2);
+        assert_eq!(char_width('\u{301}'), 0);
+    }
+
+    #[test]
+    fn repaint_paints_once_and_restores_the_cursor() {
+        let mut sc = screen(3, 40, "Ran git status --short\r\n");
+        let mut out = Vec::new();
+        sc.repaint(&mut out);
+        let s = String::from_utf8(out.clone()).unwrap();
+        assert!(s.starts_with("\x1b[1;5H"), "paint starts at the command: {s:?}");
+        assert!(s.contains("git") && s.contains("status") && s.contains("--short"));
+        // tokens a space apart share one run: one move to paint, one to restore
+        assert_eq!(s.matches('H').count(), 2, "{s:?}");
+        assert!(s.ends_with("\x1b[2;1H\x1b[0m"), "cursor restored: {s:?}");
+        out.clear();
+        sc.repaint(&mut out);
+        assert!(out.is_empty(), "nothing left to paint");
+    }
+
+    #[test]
+    fn repaint_follows_a_streamed_line() {
+        let mut sc = screen(2, 40, "Ran git");
+        let mut out = Vec::new();
+        sc.repaint(&mut out);
+        assert!(out.is_empty(), "bare command word: nothing yet");
+        sc.feed(b" status");
+        sc.repaint(&mut out);
+        assert!(String::from_utf8(out).unwrap().contains("status"));
+    }
+
+    #[test]
+    fn repaint_waits_for_a_complete_escape() {
+        let mut sc = screen(2, 40, "Ran git status\x1b[");
+        let mut out = Vec::new();
+        sc.repaint(&mut out);
+        assert!(out.is_empty());
+        sc.feed(b"0m");
+        sc.repaint(&mut out);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn remapped_foreground_is_wanted_even_in_prose() {
+        let mut sc = screen(1, 20, "\x1b[38;2;177;185;249mfoo\x1b[39m bar");
+        let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
+        sc.desired_row(0, &mut d, &mut t, &mut c, &mut k);
+        assert_eq!(d[0], REMAP_BASE);
+        assert_eq!(d[4], 0);
+        assert_eq!(k[0..3], [true, true, true]);
+    }
+
+    #[test]
+    fn attr_apply_and_render() {
+        let mut a = Attr::default();
+        a.apply(&[1, 38, 2, 10, 20, 30, 48, 5, 7]);
+        assert!(a.bold);
+        assert_eq!(a.fg, "38;2;10;20;30");
+        assert_eq!(a.bg, "48;5;7");
+        assert_eq!(a.render(""), "\x1b[0;1;48;5;7;38;2;10;20;30m");
+        assert_eq!(a.render("38;2;1;2;3"), "\x1b[0;1;48;5;7;38;2;1;2;3m");
+        a.apply(&[]);
+        assert_eq!(a, Attr::default());
+    }
 }
