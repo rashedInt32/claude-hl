@@ -5,7 +5,7 @@
   (secondaryText 999999 for tool output, codespan b1b9f9 for inline code).
   AFTER pane: the exact same bytes fed through claude-hl's screen model and
   rendered by `CLAUDE_HL_THEME=codex claude-hl --selftest`, ANSI converted to spans.
-  Pane default foreground is #b8b8b8, a neutral terminal foreground, dimmer than the theme's path tint.
+  Pane default foreground is #cccccc, a common terminal default; claude-hl never sets it.
   Screenshot: chrome --headless --force-device-scale-factor=2 --window-size=1060,<scrollHeight>
 -->
 <html lang="en">
@@ -17,7 +17,7 @@
     --page: #0b1120;
     --panel: #121a2b;
     --bar: #1a2438;
-    --fg: #b8b8b8;
+    --fg: #cccccc;
     --muted: #6f7c93;
     --edge: #1f2a3f;
   }
@@ -150,15 +150,15 @@
 <span class="dim" style="color:#7a9a9a">╰──────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
 &nbsp;
 <span class="d">⏺ </span><span class="b" style="color:#c678dd">Bash</span><span class="d">(</span><span class="b" style="color:#6fb3ff">git</span><span class="d"> </span><span style="color:#7fc8b8">status</span><span class="d"> </span><span style="color:#e78fc7">--short</span><span class="d"> </span><span style="color:#6fb3ff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#6fb3ff">git</span><span class="d"> </span><span style="color:#7fc8b8">diff</span><span class="d"> </span><span style="color:#e78fc7">--stat</span><span class="d">)</span>
-<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">   </span><span style="color:#e5c07b">M</span><span style="color:#7a9a9a"> </span><span style="color:#d0d0d0">src/main.rs</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">   </span><span style="color:#e5c07b">M</span><span style="color:#7a9a9a"> </span><span style="color:#56b6c2">src/main.rs</span>
 <span style="color:#7a9a9a">     </span><span style="color:#d19a66">1</span><span style="color:#7a9a9a"> file changed, </span><span style="color:#d19a66">24</span><span style="color:#7a9a9a"> insertions(+), </span><span style="color:#d19a66">3</span><span style="color:#7a9a9a"> deletions(-)</span>
 &nbsp;
 <span class="d">⏺ </span><span class="b" style="color:#c678dd">Bash</span><span class="d">(</span><span class="b" style="color:#6fb3ff">cargo</span><span class="d"> </span><span style="color:#7fc8b8">test</span><span class="d"> </span><span style="color:#e78fc7">--release</span><span class="d"> </span><span style="color:#e78fc7">--</span><span class="d"> </span><span style="color:#e78fc7">--nocapture</span><span class="d"> </span><span style="color:#6fb3ff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#6fb3ff">|</span><span class="d"> </span><span class="b" style="color:#6fb3ff">tail</span><span class="d"> </span><span style="color:#e78fc7">-n</span><span class="d"> </span><span style="color:#d19a66">5</span><span class="d">)</span>
-<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  </span><span style="color:#e06c75">error</span><span style="color:#7a9a9a">[E0308]: mismatched types --&gt; </span><span style="color:#d0d0d0">src/main.rs</span><span style="color:#d19a66">:42:7</span>
+<span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  </span><span style="color:#e06c75">error</span><span style="color:#7a9a9a">[E0308]: mismatched types --&gt; </span><span style="color:#56b6c2">src/main.rs</span><span style="color:#d19a66">:42:7</span>
 <span style="color:#7a9a9a">     </span><span style="color:#e5c07b">warning</span><span style="color:#7a9a9a">: unused variable `n`</span>
 <span style="color:#7a9a9a">     test result: </span><span style="color:#e06c75">FAILED</span><span style="color:#7a9a9a">. </span><span style="color:#d19a66">22</span><span style="color:#7a9a9a"> </span><span style="color:#98c379">passed</span><span style="color:#7a9a9a">; </span><span style="color:#d19a66">1</span><span style="color:#7a9a9a"> </span><span style="color:#e06c75">failed</span><span style="color:#7a9a9a">; finished in </span><span style="color:#d19a66">0.38s</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#c678dd">Read</span><span class="d">(</span><span style="color:#d0d0d0">src/main.rs</span><span class="d">)</span>
+<span class="d">⏺ </span><span class="b" style="color:#c678dd">Read</span><span class="d">(</span><span style="color:#56b6c2">src/main.rs</span><span class="d">)</span>
 <span style="color:#7a9a9a">  </span><span class="dim" style="color:#7a9a9a">⎿</span><span style="color:#7a9a9a">  Read </span><span style="color:#d19a66">120</span><span style="color:#7a9a9a"> lines</span>
 &nbsp;
 <span class="d">⏺ One borrow slipped into the release path. Fixed it, then ran the suite again.</span>
@@ -171,7 +171,7 @@
 <span style="color:#7a9a9a">      </span><span style="color:#d19a66">1</span><span style="color:#7a9a9a"> file changed, </span><span style="color:#d19a66">24</span><span style="color:#7a9a9a"> insertions(+), </span><span style="color:#d19a66">3</span><span style="color:#7a9a9a"> deletions(-)</span>
 &nbsp;
 <span class="d">⏺ Tagged. </span><span style="color:#e5c07b">v1.2.0</span><span class="d"> is on </span><span style="color:#e5c07b">main</span><span class="d">; push with </span><span class="b" style="color:#6fb3ff">git</span><span style="color:#e5c07b"> </span><span style="color:#7fc8b8">push</span><span style="color:#e5c07b"> </span><span style="color:#e78fc7">--follow-tags</span><span class="d"> when you&#x27;re ready.</span>
-<span class="d">  The build log is in </span><span style="color:#d0d0d0">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#d0d0d0">~/.config/app.toml</span><span class="d">.</span>
+<span class="d">  The build log is in </span><span style="color:#56b6c2">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#56b6c2">~/.config/app.toml</span><span class="d">.</span>
 <span class="d">  See </span><span class="u" style="color:#6fb3ff">https://docs.rs/libc</span><span class="d"> if the linker complains, and make sure the next step is a clean tree.</span>
 &nbsp;
 <span style="color:#7a9a9a">✻ Shipped for </span><span style="color:#d19a66">14s</span></pre>
@@ -183,7 +183,7 @@
       <li><i style="background:#e78fc7"></i>flag</li>
       <li><i style="background:#e5c07b"></i>string</li>
       <li><i style="background:#6fb3ff"></i>operator</li>
-      <li><i style="background:#d0d0d0"></i>path</li>
+      <li><i style="background:#56b6c2"></i>path</li>
       <li><i style="background:#d19a66"></i>number</li>
       <li><i style="background:#c678dd"></i>tool</li>
       <li><i style="background:#e06c75"></i>error</li>

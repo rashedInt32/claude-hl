@@ -57,7 +57,7 @@ const THEME_ROSE: Theme = Theme {
     remap: &[(STOCK_CODESPAN, "c4a7e7"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CODEX: Theme = Theme {
-    cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
+    cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "56b6c2", op: "6fb3ff",
     num: "d19a66", var: "98c379", url: "6fb3ff", comment: "7a9a9a",
     tool: "c678dd", err: "e06c75", warn: "e5c07b", ok: "98c379",
     remap: &[(STOCK_CODESPAN, "e5c07b"), (STOCK_SECONDARY, NVIM_COMMENT)],
@@ -69,7 +69,7 @@ const THEME_CATPPUCCIN: Theme = Theme {
     remap: &[(STOCK_CODESPAN, "cba6f7"), (STOCK_SECONDARY, "7f849c")],
 };
 const THEME_TOKYO: Theme = Theme {
-    cmd: "7aa2f7", sub: "73daca", flag: "bb9af7", string: "e0af68", path: "c0caf5", op: "7dcfff",
+    cmd: "7aa2f7", sub: "73daca", flag: "bb9af7", string: "e0af68", path: "2ac3de", op: "7dcfff",
     num: "ff9e64", var: "9ece6a", url: "7aa2f7", comment: "565f89",
     tool: "bb9af7", err: "f7768e", warn: "e0af68", ok: "9ece6a",
     remap: &[(STOCK_CODESPAN, "9d7cd8"), (STOCK_SECONDARY, "737aa2")],

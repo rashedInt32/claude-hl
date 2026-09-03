@@ -5,18 +5,19 @@
   (secondaryText 999999 for tool output, codespan b1b9f9 for inline code).
   AFTER pane: the exact same bytes fed through claude-hl's screen model and
   rendered by `CLAUDE_HL_THEME=tokyonight claude-hl --selftest`, ANSI converted to spans.
-  Screenshot: chrome --headless --force-device-scale-factor=2 --window-size=1060,1845
+  Pane default foreground is #cccccc, a common terminal default; claude-hl never sets it.
+  Screenshot: chrome --headless --force-device-scale-factor=2 --window-size=1060,<scrollHeight>
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>claude-hl — before and after</title>
+<title>claude-hl — before and after (tokyonight)</title>
 <style>
   :root {
     --page: #0b1120;
     --panel: #121a2b;
     --bar: #1a2438;
-    --fg: #a9b1d6;   /* tokyonight's own terminal foreground */
+    --fg: #cccccc;
     --muted: #6f7c93;
     --edge: #1f2a3f;
   }
@@ -149,15 +150,15 @@
 <span class="dim" style="color:#565f89">╰──────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
 &nbsp;
 <span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">status</span><span class="d"> </span><span style="color:#bb9af7">--short</span><span class="d"> </span><span style="color:#7dcfff">&amp;&amp;</span><span class="d"> </span><span class="b" style="color:#7aa2f7">git</span><span class="d"> </span><span style="color:#73daca">diff</span><span class="d"> </span><span style="color:#bb9af7">--stat</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">   </span><span style="color:#e0af68">M</span><span style="color:#737aa2"> </span><span style="color:#c0caf5">src/main.rs</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">   </span><span style="color:#e0af68">M</span><span style="color:#737aa2"> </span><span style="color:#2ac3de">src/main.rs</span>
 <span style="color:#737aa2">     </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> file changed, </span><span style="color:#ff9e64">24</span><span style="color:#737aa2"> insertions(+), </span><span style="color:#ff9e64">3</span><span style="color:#737aa2"> deletions(-)</span>
 &nbsp;
 <span class="d">⏺ </span><span class="b" style="color:#bb9af7">Bash</span><span class="d">(</span><span class="b" style="color:#7aa2f7">cargo</span><span class="d"> </span><span style="color:#73daca">test</span><span class="d"> </span><span style="color:#bb9af7">--release</span><span class="d"> </span><span style="color:#bb9af7">--</span><span class="d"> </span><span style="color:#bb9af7">--nocapture</span><span class="d"> </span><span style="color:#7dcfff">2&gt;&amp;1</span><span class="d"> </span><span style="color:#7dcfff">|</span><span class="d"> </span><span class="b" style="color:#7aa2f7">tail</span><span class="d"> </span><span style="color:#bb9af7">-n</span><span class="d"> </span><span style="color:#ff9e64">5</span><span class="d">)</span>
-<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  </span><span style="color:#f7768e">error</span><span style="color:#737aa2">[E0308]: mismatched types --&gt; </span><span style="color:#c0caf5">src/main.rs</span><span style="color:#ff9e64">:42:7</span>
+<span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  </span><span style="color:#f7768e">error</span><span style="color:#737aa2">[E0308]: mismatched types --&gt; </span><span style="color:#2ac3de">src/main.rs</span><span style="color:#ff9e64">:42:7</span>
 <span style="color:#737aa2">     </span><span style="color:#e0af68">warning</span><span style="color:#737aa2">: unused variable `n`</span>
 <span style="color:#737aa2">     test result: </span><span style="color:#f7768e">FAILED</span><span style="color:#737aa2">. </span><span style="color:#ff9e64">22</span><span style="color:#737aa2"> </span><span style="color:#9ece6a">passed</span><span style="color:#737aa2">; </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> </span><span style="color:#f7768e">failed</span><span style="color:#737aa2">; finished in </span><span style="color:#ff9e64">0.38s</span>
 &nbsp;
-<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Read</span><span class="d">(</span><span style="color:#c0caf5">src/main.rs</span><span class="d">)</span>
+<span class="d">⏺ </span><span class="b" style="color:#bb9af7">Read</span><span class="d">(</span><span style="color:#2ac3de">src/main.rs</span><span class="d">)</span>
 <span style="color:#737aa2">  </span><span class="dim" style="color:#565f89">⎿</span><span style="color:#737aa2">  Read </span><span style="color:#ff9e64">120</span><span style="color:#737aa2"> lines</span>
 &nbsp;
 <span class="d">⏺ One borrow slipped into the release path. Fixed it, then ran the suite again.</span>
@@ -170,7 +171,7 @@
 <span style="color:#737aa2">      </span><span style="color:#ff9e64">1</span><span style="color:#737aa2"> file changed, </span><span style="color:#ff9e64">24</span><span style="color:#737aa2"> insertions(+), </span><span style="color:#ff9e64">3</span><span style="color:#737aa2"> deletions(-)</span>
 &nbsp;
 <span class="d">⏺ Tagged. </span><span style="color:#9d7cd8">v1.2.0</span><span class="d"> is on </span><span style="color:#9d7cd8">main</span><span class="d">; push with </span><span class="b" style="color:#7aa2f7">git</span><span style="color:#9d7cd8"> </span><span style="color:#73daca">push</span><span style="color:#9d7cd8"> </span><span style="color:#bb9af7">--follow-tags</span><span class="d"> when you&#x27;re ready.</span>
-<span class="d">  The build log is in </span><span style="color:#c0caf5">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#c0caf5">~/.config/app.toml</span><span class="d">.</span>
+<span class="d">  The build log is in </span><span style="color:#2ac3de">target/release/build.log</span><span class="d"> and the notes are in </span><span style="color:#2ac3de">~/.config/app.toml</span><span class="d">.</span>
 <span class="d">  See </span><span class="u" style="color:#7aa2f7">https://docs.rs/libc</span><span class="d"> if the linker complains, and make sure the next step is a clean tree.</span>
 &nbsp;
 <span style="color:#737aa2">✻ Shipped for </span><span style="color:#ff9e64">14s</span></pre>
@@ -182,7 +183,7 @@
       <li><i style="background:#bb9af7"></i>flag</li>
       <li><i style="background:#e0af68"></i>string</li>
       <li><i style="background:#7dcfff"></i>operator</li>
-      <li><i style="background:#c0caf5"></i>path</li>
+      <li><i style="background:#2ac3de"></i>path</li>
       <li><i style="background:#ff9e64"></i>number</li>
       <li><i style="background:#bb9af7"></i>tool</li>
       <li><i style="background:#f7768e"></i>error</li>
