@@ -5,6 +5,7 @@
 //!   CLAUDE_HL_CMD=codex claude-hl        # wrap something else
 //!   CLAUDE_HL_THEME=rose claude-hl       # rose | catppuccin | tokyonight | dracula | gruvbox | nord (default: codex)
 //!   CLAUDE_HL_COLORS=cmd=89b4fa,num=fab387 claude-hl   # override single slots of the theme
+//!   CLAUDE_HL_CODE_BG=2a2a3a claude-hl                  # background behind inline code
 //!   CLAUDE_HL_COMMANDS="bash sh -make" claude-hl        # add words to the vocabulary, `-word` removes
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   claude-hl --selftest                 # print sample highlighted text
@@ -31,6 +32,8 @@ use std::sync::OnceLock;
 struct Theme {
     cmd: &'static str, sub: &'static str, flag: &'static str, string: &'static str, path: &'static str, op: &'static str,
     num: &'static str, var: &'static str, url: &'static str, comment: &'static str,
+    /// Claude Code tool names (`Read(`, `Bash(`), and tool-output semantics
+    tool: &'static str, err: &'static str, warn: &'static str, ok: &'static str,
     /// default foreground remaps (from, to), see `remaps()`
     remap: &'static [(&'static str, &'static str)],
 }
@@ -50,36 +53,43 @@ const NVIM_COMMENT: &str = "7a9a9a";
 const THEME_ROSE: Theme = Theme {
     cmd: "9ccfd8", sub: "c4a7e7", flag: "ebbcba", string: "f6c177", path: "e0def4", op: "9ccfd8",
     num: "ea9a97", var: "eb6f92", url: "9ccfd8", comment: "6e6a86",
+    tool: "c4a7e7", err: "eb6f92", warn: "f6c177", ok: "3e8fb0",
     remap: &[(STOCK_CODESPAN, "c4a7e7"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CODEX: Theme = Theme {
     cmd: "6fb3ff", sub: "7fc8b8", flag: "e78fc7", string: "e5c07b", path: "d0d0d0", op: "6fb3ff",
     num: "d19a66", var: "98c379", url: "6fb3ff", comment: "7a9a9a",
+    tool: "c678dd", err: "e06c75", warn: "e5c07b", ok: "98c379",
     remap: &[(STOCK_CODESPAN, "e5c07b"), (STOCK_SECONDARY, NVIM_COMMENT)],
 };
 const THEME_CATPPUCCIN: Theme = Theme {
     cmd: "89b4fa", sub: "94e2d5", flag: "f5c2e7", string: "f9e2af", path: "cdd6f4", op: "89dceb",
     num: "fab387", var: "a6e3a1", url: "89b4fa", comment: "6c7086",
+    tool: "cba6f7", err: "f38ba8", warn: "f9e2af", ok: "a6e3a1",
     remap: &[(STOCK_CODESPAN, "cba6f7"), (STOCK_SECONDARY, "7f849c")],
 };
 const THEME_TOKYO: Theme = Theme {
     cmd: "7aa2f7", sub: "73daca", flag: "bb9af7", string: "e0af68", path: "c0caf5", op: "7dcfff",
     num: "ff9e64", var: "9ece6a", url: "7aa2f7", comment: "565f89",
+    tool: "bb9af7", err: "f7768e", warn: "e0af68", ok: "9ece6a",
     remap: &[(STOCK_CODESPAN, "9d7cd8"), (STOCK_SECONDARY, "737aa2")],
 };
 const THEME_DRACULA: Theme = Theme {
     cmd: "8be9fd", sub: "50fa7b", flag: "ff79c6", string: "f1fa8c", path: "f8f8f2", op: "bd93f9",
     num: "ffb86c", var: "bd93f9", url: "8be9fd", comment: "6272a4",
+    tool: "bd93f9", err: "ff5555", warn: "f1fa8c", ok: "50fa7b",
     remap: &[(STOCK_CODESPAN, "bd93f9"), (STOCK_SECONDARY, "6272a4")],
 };
 const THEME_GRUVBOX: Theme = Theme {
     cmd: "83a598", sub: "8ec07c", flag: "d3869b", string: "fabd2f", path: "ebdbb2", op: "fe8019",
     num: "fe8019", var: "b8bb26", url: "83a598", comment: "928374",
+    tool: "d3869b", err: "fb4934", warn: "fabd2f", ok: "b8bb26",
     remap: &[(STOCK_CODESPAN, "b8bb26"), (STOCK_SECONDARY, "928374")],
 };
 const THEME_NORD: Theme = Theme {
     cmd: "88c0d0", sub: "8fbcbb", flag: "b48ead", string: "ebcb8b", path: "eceff4", op: "81a1c1",
     num: "d08770", var: "a3be8c", url: "88c0d0", comment: "616e88",
+    tool: "b48ead", err: "bf616a", warn: "ebcb8b", ok: "a3be8c",
     remap: &[(STOCK_CODESPAN, "b48ead"), (STOCK_SECONDARY, "616e88")],
 };
 
@@ -89,8 +99,10 @@ const THEME_NAMES: &[&str] = &["codex", "rose", "catppuccin", "tokyonight", "dra
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 #[allow(dead_code)]
-enum Color { None = 0, Cmd, Sub, Flag, Str, Path, Op, Num, Var, Url, Comment }
-const NCOLORS: usize = 11;
+enum Color { None = 0, Cmd, Sub, Flag, Str, Path, Op, Num, Var, Url, Comment, Tool, Err, Warn, Ok }
+const NCOLORS: usize = 15;
+/// no fg override, but the cell is inline code and gets `code_bg()`
+const CODE_BG_ONLY: u8 = 15;
 const REMAP_BASE: u8 = 16;
 
 /// `38;2;r;g;b` for a hex colour (SGR params, no ESC).
@@ -124,8 +136,8 @@ fn palette() -> &'static [String; NCOLORS] {
     static P: OnceLock<[String; NCOLORS]> = OnceLock::new();
     P.get_or_init(|| {
         let t = theme();
-        let mut hex = [t.cmd, t.sub, t.flag, t.string, t.path, t.op, t.num, t.var, t.url, t.comment];
-        const SLOTS: [&str; 10] = ["cmd", "sub", "flag", "string", "path", "op", "num", "var", "url", "comment"];
+        let mut hex = [t.cmd, t.sub, t.flag, t.string, t.path, t.op, t.num, t.var, t.url, t.comment, t.tool, t.err, t.warn, t.ok];
+        const SLOTS: [&str; 14] = ["cmd", "sub", "flag", "string", "path", "op", "num", "var", "url", "comment", "tool", "err", "warn", "ok"];
         if let Ok(spec) = std::env::var("CLAUDE_HL_COLORS") {
             for pair in spec.split(',') {
                 let Some((k, v)) = pair.trim().split_once('=') else { continue };
@@ -136,9 +148,9 @@ fn palette() -> &'static [String; NCOLORS] {
                 }
             }
         }
-        let style = |i: usize| match i { 0 => "1;", 8 => "4;", 9 => "2;", _ => "" };
+        let style = |i: usize| match i { 0 | 10 => "1;", 8 => "4;", 9 => "2;", _ => "" };
         let mut p: [String; NCOLORS] = Default::default();
-        for i in 0..10 { p[i + 1] = format!("{}{}", style(i), fg_params(hex[i])); }
+        for i in 0..NCOLORS - 1 { p[i + 1] = format!("{}{}", style(i), fg_params(hex[i])); }
         p
     })
 }
@@ -169,8 +181,36 @@ fn remaps() -> &'static Vec<(String, String)> {
 
 /// SGR params for a colour code.
 fn code_sgr(code: u8) -> &'static str {
-    if code < REMAP_BASE { &palette()[code as usize] } else { &remaps()[(code - REMAP_BASE) as usize].1 }
+    if code == CODE_BG_ONLY { "" }
+    else if code < REMAP_BASE { &palette()[code as usize] }
+    else { &remaps()[(code - REMAP_BASE) as usize].1 }
 }
+
+/// `CLAUDE_HL_CODE_BG=rrggbb`: a background behind inline code (SGR params).
+fn code_bg() -> &'static str {
+    static B: OnceLock<String> = OnceLock::new();
+    B.get_or_init(|| match std::env::var("CLAUDE_HL_CODE_BG") {
+        Ok(h) => {
+            let h = h.trim().trim_start_matches('#');
+            if valid_hex(h) { fg_params(h).replacen("38;", "48;", 1) }
+            else { if !h.is_empty() { eprintln!("claude-hl: ignoring CLAUDE_HL_CODE_BG={h:?}, want rrggbb"); } String::new() }
+        }
+        Err(_) => String::new(),
+    })
+}
+
+/// The fg Claude Code draws tool output in (secondaryText); semantic words
+/// like `error` and `passed` are only painted inside it.
+fn secondary_fg() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| fg_params(STOCK_SECONDARY))
+}
+
+/// per-byte context bits handed to the tokenizer
+const CTX_CODE: u8 = 1;
+const CTX_GRAY: u8 = 2;
+/// default foreground: the app chose no colour, so chrome may be dimmed
+const CTX_PLAIN: u8 = 4;
 
 /// The fg Claude Code draws inline code in; a cell in this colour is
 /// definitely code, so the tokenizer can be generous there.
@@ -221,6 +261,20 @@ you we i will can should after before when do not into was are has have your our
 /// prose (Claude Code's tool-call recap, a shell prompt)
 const RUNNER_PREFIXES: &[&str] = &["Ran", "Run", "Running", "Bash(", "$", "❯", "›"];
 
+/// Claude Code tool names as they appear in `⏺ Read(src/main.rs)`
+const TOOL_NAMES: &str = "Read Edit Write Bash Grep Glob Agent Task Update Search Fetch WebFetch WebSearch \
+TodoWrite MultiEdit NotebookEdit Skill LS Call Explore Plan";
+
+/// file extensions that make a bare word a path (`main.rs`, `package.json`)
+const EXTENSIONS: &str = "rs ts tsx js jsx mjs cjs json toml yaml yml md txt py go rb java kt swift c cc cpp h \
+hpp cs php html css scss sh zsh lock sql env xml svg png jpg jpeg gif csv log ini cfg conf lua vim el \
+ex exs erl hs ml scala dart proto graphql gql wasm zip tar gz pdf ipynb sum mod";
+
+/// tool-output words worth a colour (only inside Claude Code's gray output)
+const ERR_WORDS: &str = "error errors Error ERROR FAILED FAIL failed fail failure panicked panic fatal Fatal FATAL";
+const WARN_WORDS: &str = "warning warnings Warning WARNING warn WARN deprecated Deprecated";
+const OK_WORDS: &str = "ok OK passed pass PASS PASSED success Success succeeded done Done";
+
 /// bare words accepted after the command (e.g. `push origin main`)
 const MAX_SUB: usize = 3;
 /// in prose, bare non-subcommand words tolerated before giving up
@@ -231,6 +285,11 @@ struct Vocab {
     subcmd_tools: HashSet<&'static str>,
     chain_tools: HashSet<&'static str>,
     stop_words: HashSet<&'static str>,
+    tools: HashSet<&'static str>,
+    exts: HashSet<&'static str>,
+    err_words: HashSet<&'static str>,
+    warn_words: HashSet<&'static str>,
+    ok_words: HashSet<&'static str>,
 }
 
 fn vocab() -> &'static Vocab {
@@ -241,6 +300,11 @@ fn vocab() -> &'static Vocab {
             subcmd_tools: SUBCMD_TOOLS.split_whitespace().collect(),
             chain_tools: CHAIN_TOOLS.split_whitespace().collect(),
             stop_words: STOP_WORDS.split_whitespace().collect(),
+            tools: TOOL_NAMES.split_whitespace().collect(),
+            exts: EXTENSIONS.split_whitespace().collect(),
+            err_words: ERR_WORDS.split_whitespace().collect(),
+            warn_words: WARN_WORDS.split_whitespace().collect(),
+            ok_words: OK_WORDS.split_whitespace().collect(),
         };
         // CLAUDE_HL_COMMANDS="bash sh -make": `word` adds, `-word` removes;
         // `word:sub` also accepts bare subcommands after it
@@ -337,7 +401,7 @@ fn next_arg(t: &[u8], i: usize) -> Option<(Kind, usize)> {
         if j < n && t[j].is_ascii_digit() {
             let mut k = j + 1;
             while k < n && t[k].is_ascii_digit() { k += 1; }
-            if at_boundary(t, k) { return Some((Kind::Flag, k)); }
+            if at_boundary(t, k) || t[k] == b')' { return Some((Kind::Flag, k)); }
         }
         // `--` and `-` on their own (`cargo test -- --nocapture`, `cd -`)
         if at_boundary(t, j) { return Some((Kind::Flag, j)); }
@@ -407,20 +471,22 @@ fn has_runner_prefix(text: &str, cs: usize) -> bool {
 
 /// Compute colour spans (byte ranges) for one line of text.
 ///
-/// `code[b]` says byte `b` sits in a cell Claude Code drew as inline code.
+/// `ctx[b]` carries context bits for byte `b`: `CTX_CODE` if Claude Code drew
+/// the cell as inline code, `CTX_GRAY` if as tool output.
 /// Inside code, or right after a runner prefix, the tokenizer is generous:
 /// bare words are arguments and `git status` alone is a command. In prose it
 /// demands evidence (a flag, path, string, operator or number), so "make
 /// sure", "go ahead" and "next step" stay plain.
-fn spans(text: &str, code: &[bool], out: &mut Vec<(usize, usize, Color)>) {
+fn spans(text: &str, ctx: &[u8], out: &mut Vec<(usize, usize, Color)>) {
     let t = text.as_bytes();
     let v = vocab();
     let mut pos = 0;
+    let code = ctx;
     while let Some((cs, ce)) = find_cmd(t, pos) {
         let mut cmd = &text[cs..ce];
         let mark = out.len();
         out.push((cs, ce, Color::Cmd));
-        let in_code = |a: usize, b: usize| code.get(a..b).map_or(false, |c| c.iter().any(|&x| x));
+        let in_code = |a: usize, b: usize| code.get(a..b).map_or(false, |c| c.iter().any(|&x| x & CTX_CODE != 0));
         let runner = has_runner_prefix(text, cs);
         let cmd_in_code = in_code(cs, ce);
         let strong = runner || cmd_in_code;
@@ -494,10 +560,11 @@ fn spans(text: &str, code: &[bool], out: &mut Vec<(usize, usize, Color)>) {
                     if sub_ok { subs += 1; Color::Sub }
                     else if strong || in_code(i, end) { Color::Path }
                     else {
-                        // prose: take a few bare words on trust; if no flag,
-                        // path or operator ever shows up the span is dropped
+                        // prose: take a few bare words on trust while waiting
+                        // for evidence; once there is some, a bare word is
+                        // more likely the sentence resuming than an argument
                         bare += 1;
-                        if bare > MAX_BARE { break; }
+                        if evidence || bare > MAX_BARE { break; }
                         Color::Path
                     }
                 }
@@ -538,6 +605,180 @@ fn spans(text: &str, code: &[bool], out: &mut Vec<(usize, usize, Color)>) {
         }
         pos = i;
     }
+    extra_spans(text, ctx, out);
+}
+
+// ---- extra highlighting: paths, tool lines, tool output, chrome ----------
+
+fn is_url(tok: &str) -> bool {
+    ["http://", "https://", "ssh://", "git@", "file://", "www."].iter().any(|p| tok.starts_with(p)) && tok.len() > 8
+}
+
+/// Does `tok` look like a file path? Returns (end of the path part, whether a
+/// `:line` or `:line:col` suffix follows). Absolute, relative and home paths
+/// always count; otherwise a known extension or a dotfile is needed, so
+/// "and/or" and "e.g." stay plain.
+fn path_like(tok: &str, v: &Vocab) -> Option<(usize, bool)> {
+    let b = tok.as_bytes();
+    let mut end = b.len();
+    let mut lineno = false;
+    for _ in 0..2 {
+        let Some(k) = b[..end].iter().rposition(|&c| c == b':') else { break };
+        if k + 1 < end && b[k + 1..end].iter().all(|c| c.is_ascii_digit()) { end = k; lineno = true; } else { break; }
+    }
+    let p = &tok[..end];
+    if p.len() < 2 || p.contains("//") { return None; }
+    if !p.bytes().all(|c| is_word(c) || matches!(c, b'/' | b'.' | b'-' | b'~' | b'@' | b'+')) { return None; }
+    let rooted = p.starts_with('/') || p.starts_with("./") || p.starts_with("../") || p.starts_with("~/");
+    let last = p.rsplit('/').next().unwrap_or(p);
+    let ext_ok = last.rsplit_once('.').map_or(false, |(_, ext)| v.exts.contains(ext));
+    let dotfile = !p.contains('/') && p.starts_with('.') && p[1..].bytes().all(|c| is_word(c) || c == b'-' || c == b'.') && p[1..].bytes().any(|c| c.is_ascii_alphabetic());
+    if rooted || ext_ok || dotfile { Some((end, lineno)) } else { None }
+}
+
+/// Everything the command tokenizer did not claim: paths and URLs anywhere,
+/// `⏺ Read(...)` tool names, `error`/`passed`/numbers/git status codes in
+/// tool output, and dimmed box drawing.
+fn extra_spans(text: &str, ctx: &[u8], out: &mut Vec<(usize, usize, Color)>) {
+    let t = text.as_bytes();
+    let n = t.len();
+    if n == 0 || ctx.len() < n { return; }
+    let v = vocab();
+    let mut painted = vec![false; n];
+    for &(a, b, _) in out.iter() { for p in painted.iter_mut().take(b).skip(a) { *p = true; } }
+    let bits = |a: usize, b: usize| ctx[a..b].iter().fold(0u8, |x, &y| x | y);
+    let mut found: Vec<(usize, usize, Color)> = Vec::new();
+    let mut push = |a: usize, b: usize, c: Color, painted: &mut Vec<bool>| {
+        if a < b && !painted[a..b].iter().any(|&p| p) {
+            found.push((a, b, c));
+            for p in painted.iter_mut().take(b).skip(a) { *p = true; }
+        }
+    };
+
+    // git status codes at the start of an output line: `M src/x.rs`, `?? new/`
+    {
+        let mut i = 0;
+        while i < n {
+            if is_ws(t[i]) { i += 1; } else if text[i..].starts_with('⎿') { i += '⎿'.len_utf8(); } else { break; }
+        }
+        let s = i;
+        while i < n && i - s < 2 && matches!(t[i], b'M' | b'A' | b'D' | b'R' | b'C' | b'U' | b'?' | b'!') { i += 1; }
+        let codes = i - s;
+        let mut j = i;
+        while j < n && j - i <= 2 && is_ws(t[j]) { j += 1; }
+        let rest = &text[j..];
+        let word = rest.split(|c: char| c.is_whitespace()).next().unwrap_or("");
+        let pathish = word.contains('/') || word.contains('.') || codes == 2;
+        if codes > 0 && j > i && !word.is_empty() && pathish && bits(s, i) & CTX_GRAY != 0 {
+            for k in s..i {
+                let c = match t[k] { b'A' => Color::Ok, b'D' | b'U' => Color::Err, b'?' | b'!' => Color::Comment, _ => Color::Warn };
+                push(k, k + 1, c, &mut painted);
+            }
+        }
+    }
+
+    // tool names: `⏺ Read(src/main.rs)`, `● Bash(cargo test)`
+    {
+        let mut i = 0;
+        while i < n {
+            if !t[i].is_ascii_alphabetic() || (i > 0 && is_word(t[i - 1])) { i += 1; continue; }
+            let s = i;
+            while i < n && t[i].is_ascii_alphabetic() { i += 1; }
+            if i < n && t[i] == b'(' && v.tools.contains(&text[s..i]) {
+                let before = text[..s].trim_end();
+                let bullet = before.chars().last().map_or(true, |c| "⏺●○◐◑◒◓✻✽✳*•-".contains(c));
+                if bullet { push(s, i, Color::Tool, &mut painted); }
+            }
+        }
+    }
+
+    // paths and URLs in any context except inline code (the remap owns that)
+    {
+        let mut i = 0;
+        while i < n {
+            if is_space(t[i]) { i += 1; continue; }
+            let s = i;
+            while i < n && !is_space(t[i]) { i += 1; }
+            let (mut a, mut b) = (s, i);
+            while a < b && matches!(t[a], b'(' | b'[' | b'{' | b'"' | b'\'' | b'`' | b'<') { a += 1; }
+            while a < b && matches!(t[b - 1], b')' | b']' | b'}' | b'"' | b'\'' | b'`' | b'>' | b',' | b'.' | b';' | b':' | b'!' | b'?') { b -= 1; }
+            if let Some(k) = t[a..b].iter().position(|&c| c == b'(') {
+                if v.tools.contains(&text[a..a + k]) { a += k + 1; }
+            }
+            if a >= b || bits(a, b) & CTX_CODE != 0 || painted[a..b].iter().any(|&p| p) { continue; }
+            let tok = &text[a..b];
+            if is_url(tok) { push(a, b, Color::Url, &mut painted); continue; }
+            if let Some((pend, lineno)) = path_like(tok, v) {
+                push(a, a + pend, Color::Path, &mut painted);
+                if lineno { push(a + pend, b, Color::Num, &mut painted); }
+            }
+        }
+    }
+
+    // tool output: outcome words, numbers, check marks
+    {
+        let mut i = 0;
+        while i < n {
+            if ctx[i] & CTX_GRAY == 0 || painted[i] { i += 1; continue; }
+            let c0 = t[i];
+            let fresh = i == 0 || !(is_word(t[i - 1]) || t[i - 1] == b'.');
+            if c0.is_ascii_digit() && fresh {
+                let s = i;
+                while i < n && t[i].is_ascii_digit() { i += 1; }
+                while i + 1 < n && t[i] == b'.' && t[i + 1].is_ascii_digit() {
+                    i += 1;
+                    while i < n && t[i].is_ascii_digit() { i += 1; }
+                }
+                let mut j = i;
+                while j < n && j - i < 2 && (t[j].is_ascii_alphabetic() || t[j] == b'%') { j += 1; }
+                if j >= n || !is_word(t[j]) { push(s, j, Color::Num, &mut painted); i = j; }
+                continue;
+            }
+            if is_word(c0) && fresh {
+                let s = i;
+                while i < n && is_word(t[i]) { i += 1; }
+                let w = &text[s..i];
+                let col = if v.err_words.contains(w) { Some(Color::Err) }
+                    else if v.warn_words.contains(w) { Some(Color::Warn) }
+                    else if v.ok_words.contains(w) { Some(Color::Ok) } else { None };
+                if let Some(c) = col { push(s, i, c, &mut painted); }
+                continue;
+            }
+            if c0 >= 0x80 {
+                let ch = text[i..].chars().next().unwrap();
+                let l = ch.len_utf8();
+                match ch {
+                    '✓' | '✔' => push(i, i + l, Color::Ok, &mut painted),
+                    '✗' | '✘' | '×' => push(i, i + l, Color::Err, &mut painted),
+                    _ => {}
+                }
+                i += l;
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // chrome: box drawing and the `⎿` connector, dimmed when the app left
+    // them in the default or gray colour
+    {
+        let mut i = 0;
+        let mut run: Option<usize> = None;
+        while i <= n {
+            let (chrome, l) = if i < n && t[i] >= 0x80 {
+                let ch = text[i..].chars().next().unwrap();
+                let u = ch as u32;
+                (((0x2500..=0x257F).contains(&u) || u == 0x23BF) && ctx[i] & (CTX_PLAIN | CTX_GRAY) != 0, ch.len_utf8())
+            } else { (false, 1) };
+            match (chrome, run) {
+                (true, None) => run = Some(i),
+                (false, Some(s)) => { push(s, i, Color::Comment, &mut painted); run = None; }
+                _ => {}
+            }
+            i += l;
+        }
+    }
+    out.extend(found);
 }
 
 // ---- attributes ------------------------------------------------------------
@@ -579,8 +820,11 @@ impl Attr {
     }
 
     /// One SGR that reproduces this attribute set from scratch. `fg_override`
-    /// is SGR params (e.g. `1;38;2;r;g;b`) that replace the cell's own fg.
-    fn render(&self, fg_override: &str) -> String {
+    /// is SGR params (e.g. `1;38;2;r;g;b`) that replace the cell's own fg;
+    /// `bg_override` likewise for the background.
+    fn render(&self, fg_override: &str) -> String { self.render_bg(fg_override, "") }
+
+    fn render_bg(&self, fg_override: &str, bg_override: &str) -> String {
         let mut s = String::from("\x1b[0");
         if self.bold { s.push_str(";1") }
         if self.dim { s.push_str(";2") }
@@ -590,7 +834,8 @@ impl Attr {
         if self.inverse { s.push_str(";7") }
         if self.hidden { s.push_str(";8") }
         if self.strike { s.push_str(";9") }
-        if !self.bg.is_empty() { s.push(';'); s.push_str(&self.bg) }
+        if !bg_override.is_empty() { s.push(';'); s.push_str(bg_override) }
+        else if !self.bg.is_empty() { s.push(';'); s.push_str(&self.bg) }
         if !fg_override.is_empty() { s.push(';'); s.push_str(fg_override) }
         else if !self.fg.is_empty() { s.push(';'); s.push_str(&self.fg) }
         s.push('m');
@@ -1001,31 +1246,35 @@ impl Screen {
     /// Text of one row plus, per byte, the cell it came from and whether that
     /// cell is inline code. `cell_of` has one extra entry mapping `text.len()`
     /// to `cols`, so span ends can be looked up too.
-    fn row_text(&self, r: usize, text: &mut String, cell_of: &mut Vec<usize>, code: &mut Vec<bool>) {
-        text.clear(); cell_of.clear(); code.clear();
-        let cs = codespan_fg();
+    fn row_text(&self, r: usize, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
+        text.clear(); cell_of.clear(); ctx.clear();
+        let (cs, gray) = (codespan_fg(), secondary_fg());
         for (ci, cell) in self.grid[r].iter().enumerate() {
             if cell.cont { continue; }
             let start = text.len();
             text.push(cell.ch);
             if let Some(z) = &cell.zw { text.push_str(z); }
-            let is_code = cell.attr.fg == cs;
-            for _ in start..text.len() { cell_of.push(ci); code.push(is_code); }
+            let bits = if cell.attr.fg == cs { CTX_CODE } else if cell.attr.fg == gray { CTX_GRAY }
+                       else if cell.attr.fg.is_empty() { CTX_PLAIN } else { 0 };
+            for _ in start..text.len() { cell_of.push(ci); ctx.push(bits); }
         }
         cell_of.push(self.cols);
     }
 
     /// Colour code wanted for every cell of row `r`: remaps first, then the
     /// tokenizer's spans on top, then wide-char continuations follow their head.
-    fn desired_row(&mut self, r: usize, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, code: &mut Vec<bool>) {
-        self.row_text(r, text, cell_of, code);
+    fn desired_row(&mut self, r: usize, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
+        self.row_text(r, text, cell_of, ctx);
         self.spans_buf.clear();
-        spans(text, code, &mut self.spans_buf);
+        spans(text, ctx, &mut self.spans_buf);
         desired.clear(); desired.resize(self.cols, 0);
         let rm = remaps();
-        if !rm.is_empty() {
+        let bg = !code_bg().is_empty();
+        if !rm.is_empty() || bg {
+            let cs = codespan_fg();
             for (ci, cell) in self.grid[r].iter().enumerate() {
                 if let Some(k) = rm.iter().position(|(from, _)| *from == cell.attr.fg) { desired[ci] = REMAP_BASE + k as u8; }
+                else if bg && cell.attr.fg == cs { desired[ci] = CODE_BG_ONLY; }
             }
         }
         for &(s, e, color) in &self.spans_buf {
@@ -1067,7 +1316,8 @@ impl Screen {
                             None => true,
                         };
                         if need {
-                            seg.push_str(&cell.attr.render(code_sgr(desired[c])));
+                            let bg = if cell.attr.fg == codespan_fg() { code_bg() } else { "" };
+                            seg.push_str(&cell.attr.render_bg(code_sgr(desired[c]), bg));
                             last_attr = Some((cell.attr.clone(), desired[c]));
                         }
                         seg.push(cell.ch);
@@ -1105,7 +1355,11 @@ impl Screen {
                 let cell = &self.grid[r][c];
                 if cell.cont { continue; }
                 let need = match &last { Some((a, col)) => **a != *cell.attr || *col != desired[c], None => true };
-                if need { s.push_str(&cell.attr.render(code_sgr(desired[c]))); last = Some((cell.attr.clone(), desired[c])); }
+                if need {
+                    let bg = if cell.attr.fg == codespan_fg() { code_bg() } else { "" };
+                    s.push_str(&cell.attr.render_bg(code_sgr(desired[c]), bg));
+                    last = Some((cell.attr.clone(), desired[c]));
+                }
                 s.push(cell.ch);
                 if let Some(z) = &cell.zw { s.push_str(z); }
             }
@@ -1350,6 +1604,19 @@ Run git status to see changes, then:\r\n\
   pytest tests/test_auth.py -k \"login\" | tail -20 > /tmp/out.log\r\n\
   docker run -it --rm -v $(pwd):/app -e PORT=3000 node:20 bash\r\n\
   git clone https://github.com/rashedInt32/claude-hl && cd claude-hl && chmod +x build.sh\r\n\
+⏺ Read(src/main.rs)\r\n\
+\x1b[38;2;153;153;153m  ⎿  Read 120 lines\x1b[39m\r\n\
+⏺ Bash(cargo test --release 2>&1 | tail -3)\r\n\
+\x1b[38;2;153;153;153m  ⎿  test result: ok. 23 passed; 0 failed; finished in 0.42s\x1b[39m\r\n\
+\x1b[38;2;153;153;153m  ⎿  error[E0308]: mismatched types --> src/main.rs:42:7\x1b[39m\r\n\
+\x1b[38;2;153;153;153m  ⎿   M src/main.rs\x1b[39m\r\n\
+\x1b[38;2;153;153;153m     ?? docs/notes.md\x1b[39m\r\n\
+\x1b[38;2;153;153;153m  ⎿  Done (3 tool uses · 12s)\x1b[39m\r\n\
+The build log is in target/release/build.log and the config in ~/.config/app.toml, see README.md.\r\n\
+See https://docs.rs/libc and the panic at src/main.rs:42 (and/or e.g. Node.js).\r\n\
+╭──────────────╮\r\n\
+│ > ask me     │\r\n\
+╰──────────────╯\r\n\
 Use \x1b[38;2;95;179;217mclaude --rc \"my-project\"\x1b[39m from the project dir.\r\n\
 Tagged. \x1b[38;2;177;185;249mv1.2.0\x1b[39m is on \x1b[38;2;177;185;249mmain\x1b[39m; push with \x1b[38;2;177;185;249mgit push --follow-tags\x1b[39m when ready.\r\n\
 Let me make sure the build passes, then go ahead with the next step; run \x1b[38;2;177;185;249mnpm test\x1b[39m after.\r\n\
@@ -1394,9 +1661,10 @@ mod tests {
     use super::*;
 
     /// `[tok:Kind]` markup of what `spans` would paint, e.g. `[git:Cmd] [status:Sub]`.
-    fn paint_with(line: &str, code: &[bool]) -> String {
+    fn paint_with(line: &str, code: &[u8]) -> String {
         let mut v = Vec::new();
         spans(line, code, &mut v);
+        v.sort_by_key(|s| s.0);
         let mut o = String::new();
         let mut last = 0;
         for (a, b, c) in v {
@@ -1407,13 +1675,15 @@ mod tests {
         o.push_str(&line[last..]);
         o
     }
-    fn paint(line: &str) -> String { paint_with(line, &vec![false; line.len()]) }
+    fn paint(line: &str) -> String { paint_with(line, &vec![CTX_PLAIN; line.len()]) }
     /// like `paint`, but bytes in `code_range` count as inline code
     fn paint_code(line: &str, code_range: std::ops::Range<usize>) -> String {
-        let mut code = vec![false; line.len()];
-        for b in code.iter_mut().take(code_range.end).skip(code_range.start) { *b = true; }
+        let mut code = vec![0; line.len()];
+        for b in code.iter_mut().take(code_range.end).skip(code_range.start) { *b = CTX_CODE; }
         paint_with(line, &code)
     }
+    /// like `paint`, but the whole line is tool output (gray)
+    fn paint_gray(line: &str) -> String { paint_with(line, &vec![CTX_GRAY; line.len()]) }
 
     #[test]
     fn prose_with_tool_names_stays_plain() {
@@ -1593,7 +1863,61 @@ mod tests {
         sc.desired_row(0, &mut d, &mut t, &mut c, &mut k);
         assert_eq!(d[0], REMAP_BASE);
         assert_eq!(d[4], 0);
-        assert_eq!(k[0..3], [true, true, true]);
+        assert_eq!(k[0..3], [CTX_CODE, CTX_CODE, CTX_CODE]);
+    }
+
+    #[test]
+    fn tool_output_semantics_only_in_gray() {
+        assert_eq!(paint_gray("  ⎿  test result: ok. 23 passed; 0 failed; finished in 0.42s"),
+            "  [⎿:Comment]  test result: [ok:Ok]. [23:Num] [passed:Ok]; [0:Num] [failed:Err]; finished in [0.42s:Num]");
+        assert_eq!(paint_gray("error[E0308]: mismatched types --> src/main.rs:42:7"),
+            "[error:Err][E0308]: mismatched types --> [src/main.rs:Path][:42:7:Num]");
+        assert_eq!(paint_gray("Done (3 tool uses · 12s) ✓ warning: unused"),
+            "[Done:Ok] ([3:Num] tool uses · [12s:Num]) [✓:Ok] [warning:Warn]: unused");
+        // the same words in prose stay plain
+        assert_eq!(paint("the error was fixed and 3 tests passed"), "the error was fixed and 3 tests passed");
+    }
+
+    #[test]
+    fn git_status_codes() {
+        assert_eq!(paint_gray("  ⎿   M src/main.rs"), "  [⎿:Comment]   [M:Warn] [src/main.rs:Path]");
+        assert_eq!(paint_gray("?? docs/notes.md"), "[?:Comment][?:Comment] [docs/notes.md:Path]");
+        assert_eq!(paint_gray("A  Makefile"), "A  Makefile");
+        assert_eq!(paint_gray("A new file was created"), "A new file was created");
+        assert_eq!(paint_gray("D  old/thing.rs"), "[D:Err]  [old/thing.rs:Path]");
+    }
+
+    #[test]
+    fn paths_and_urls_anywhere() {
+        assert_eq!(paint("The log is in target/release/build.log, see README.md."),
+            "The log is in [target/release/build.log:Path], see [README.md:Path].");
+        assert_eq!(paint("See https://docs.rs/libc and src/main.rs:42 (and/or e.g. ok)."),
+            "See [https://docs.rs/libc:Url] and [src/main.rs:Path][:42:Num] (and/or e.g. ok).");
+        assert_eq!(paint("edit ~/.config/app.toml or .gitignore"), "edit [~/.config/app.toml:Path] or [.gitignore:Path]");
+        // inside inline code the remap owns the colour
+        let line = "the file src/main.rs now";
+        assert_eq!(paint_code(line, 9..20), line);
+        assert_eq!(paint("open src/main.rs now"), "[open:Cmd] [src/main.rs:Path] now");
+    }
+
+    #[test]
+    fn tool_names_and_chrome() {
+        assert_eq!(paint("⏺ Read(src/main.rs)"), "⏺ [Read:Tool]([src/main.rs:Path])");
+        assert_eq!(paint("⏺ Bash(cargo test 2>&1 | tail -3)"),
+            "⏺ [Bash:Tool]([cargo:Cmd] [test:Sub] [2>&1:Op] [|:Op] [tail:Cmd] [-3:Flag])");
+        assert_eq!(paint("Please Read(the docs)"), "Please Read(the docs)");
+        assert_eq!(paint("╭───╮ │ x │"), "[╭───╮:Comment] [│:Comment] x [│:Comment]");
+        // coloured chrome belongs to the app
+        let line = "│ x";
+        assert_eq!(paint_with(line, &vec![0; line.len()]), line);
+    }
+
+    #[test]
+    fn code_background_render() {
+        let mut a = Attr::default();
+        a.apply(&[38, 2, 177, 185, 249]);
+        assert_eq!(a.render_bg("38;2;1;2;3", "48;2;9;9;9"), "\x1b[0;48;2;9;9;9;38;2;1;2;3m");
+        assert_eq!(code_sgr(CODE_BG_ONLY), "");
     }
 
     #[test]

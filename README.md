@@ -43,7 +43,8 @@ That's it. There's nothing to configure.
 | Variable | What it does |
 |---|---|
 | `CLAUDE_HL_THEME=rose` | Pick a palette: `codex` (default), `rose`, `catppuccin`, `tokyonight`, `dracula`, `gruvbox`, `nord` |
-| `CLAUDE_HL_COLORS=cmd=89b4fa,num=fab387` | Override single slots of the theme. Slots: `cmd sub flag string path op num var url comment` |
+| `CLAUDE_HL_COLORS=cmd=89b4fa,num=fab387` | Override single slots of the theme. Slots: `cmd sub flag string path op num var url comment tool err warn ok` |
+| `CLAUDE_HL_CODE_BG=2a2a3a` | Draw a background behind inline code, GitHub style. Off by default |
 | `CLAUDE_HL_COMMANDS="bash sh -make"` | Grow the vocabulary without a rebuild. `word` adds a command, `word:sub` adds one that takes subcommands (`just:sub`), `-word` removes one |
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
@@ -109,6 +110,22 @@ recaps start with `Ran`, so a command after that prefix is trusted too. Anywhere
 else, a command only paints once a flag, path, string, number or operator turns
 up; `git push --follow-tags` in a sentence paints, `git status` in a sentence
 does not, and neither does `make sure the build passes`.
+
+Beyond commands, a second pass paints what the first left alone:
+
+- **Paths and URLs anywhere.** `target/release/build.log`, `~/.config/app.toml`,
+  `README.md`, `.gitignore`, `https://docs.rs/libc`. A `src/main.rs:42:7`
+  reference gets its line number in the number colour. Bare words need a known
+  extension or a leading `/`, `./` or `~/`, so "and/or" and "e.g." stay plain.
+- **Tool output.** Claude Code draws tool results in one flat gray. Inside that
+  gray only, `error`, `FAILED` and `panicked` go red, `warning` yellow, `ok`,
+  `passed` and `Done` green, numbers and durations (`23`, `0.42s`, `1.2k`) get
+  the number colour, and `git status --short` codes paint by kind. The same
+  words in Claude's prose are left alone.
+- **Tool lines.** `⏺ Read(src/main.rs)`, `⏺ Bash(cargo test)`: the tool name
+  in its own colour, the argument as a path or a command.
+- **Chrome.** Box drawing and the `⎿` connector are dimmed when the app drew
+  them in the default colour.
 
 Repaints are cheap on the terminal side: tokens a few cells apart share one
 cursor move and one SGR, and attributes are emitted as a single sequence.
