@@ -1071,7 +1071,20 @@ impl Screen {
                     let c = s.chars().next().unwrap();
                     self.utf8.clear();
                     self.put(c);
-                } else if self.utf8.len() >= 4 || (b & 0xC0) != 0x80 && self.utf8.len() > 1 {
+                } else if (b & 0xC0) != 0x80 && self.utf8.len() > 1 {
+                    // `b` is not a continuation byte, so the pending bytes can
+                    // never complete — but `b` itself may open a good sequence.
+                    // Drop the garbage and retry `b`, else the character it
+                    // starts is swallowed and the model sits one cell out of
+                    // step with the terminal for the rest of the row, putting
+                    // every later repaint of that row on the wrong cells.
+                    // Recursion stops after one step: the buffer is empty, so
+                    // the `len() > 1` guard above cannot hold again.
+                    self.utf8.clear();
+                    self.feed_byte(b);
+                } else if self.utf8.len() >= 4 {
+                    // no encoding starts here at all; `b` is a continuation
+                    // byte, so there is nothing to retry
                     self.utf8.clear();
                 }
             }
