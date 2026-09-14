@@ -1383,6 +1383,45 @@ static QUIT: AtomicI32 = AtomicI32::new(0);
 extern "C" fn on_winch(_: libc::c_int) { WINCH.store(true, Ordering::SeqCst); }
 extern "C" fn on_quit(sig: libc::c_int) { QUIT.store(sig, Ordering::SeqCst); }
 
+/// waitpid with a deadline. True once the child is reaped (or already gone).
+fn wait_for(pid: libc::pid_t, status: &mut libc::c_int, ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    loop {
+        let w = unsafe { libc::waitpid(pid, status, libc::WNOHANG) };
+        if w == pid { return true; }
+        // ECHILD: someone already reaped it. Anything but EINTR is terminal.
+        if w < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { return true; }
+        if std::time::Instant::now() >= deadline { return false; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Collect the child, escalating until it actually goes.
+///
+/// Forwarding the quit signal is not enough: Claude Code (2.1.x, verified)
+/// installs handlers that swallow SIGHUP *and* SIGTERM, so a plain
+/// `waitpid(..., 0)` here parks this process forever and the pair outlives the
+/// pane that owned it — two orphans reparented to init, holding a pty nobody
+/// can reach. Closing the master is the lever that works: the child sees EOF
+/// on its controlling tty and exits on its own, which lets it clean up its
+/// ~/.claude/sessions entry. SIGKILL is only the backstop, and it is worth
+/// waiting a while to avoid it, since a killed child leaves that file behind.
+fn reap(pid: libc::pid_t, master: libc::c_int) -> libc::c_int {
+    let mut status: libc::c_int = 0;
+    // A child that already exited (the common path: EOF on master) reaps here
+    // immediately, so none of the grace below costs anything on a normal quit.
+    if !wait_for(pid, &mut status, 1500) {
+        unsafe { libc::close(master); }
+        if !wait_for(pid, &mut status, 5000) {
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+            wait_for(pid, &mut status, 2000);
+        }
+    }
+    if libc::WIFEXITED(status) { return libc::WEXITSTATUS(status); }
+    if libc::WIFSIGNALED(status) { return 128 + libc::WTERMSIG(status); }
+    1
+}
+
 fn winsize(fd: libc::c_int) -> Option<libc::winsize> {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
@@ -1583,12 +1622,7 @@ fn run(argv: &[String]) -> i32 {
     }
 
     if let Some(t) = old { unsafe { libc::tcsetattr(stdin, libc::TCSADRAIN, &t); } }
-    let mut status: libc::c_int = 0;
-    let w = unsafe { libc::waitpid(pid, &mut status, 0) };
-    if w < 0 { return 0; }
-    if libc::WIFEXITED(status) { return libc::WEXITSTATUS(status); }
-    if libc::WIFSIGNALED(status) { return 128 + libc::WTERMSIG(status); }
-    1
+    reap(pid, master)
 }
 
 // ---- entry -----------------------------------------------------------------
