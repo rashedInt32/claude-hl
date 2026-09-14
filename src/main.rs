@@ -965,9 +965,16 @@ impl Screen {
         self.pending_wrap = false;
     }
 
+    /// Rows the scroll region holds, or 0 when the margins are inverted.
+    /// Scrolling more than this blanks the region and every extra pass is pure
+    /// cost, so the count is clamped: a CSI param reaches 65535, and each pass
+    /// allocates a row and memmoves the grid.
+    fn region_rows(&self) -> usize {
+        if self.top > self.bottom { 0 } else { self.bottom - self.top + 1 }
+    }
+
     fn scroll_up(&mut self, n: usize) {
-        for _ in 0..n {
-            if self.top > self.bottom { break; }
+        for _ in 0..n.min(self.region_rows()) {
             let blank = self.blank();
             let line = vec![blank; self.cols];
             self.grid.remove(self.top);
@@ -978,8 +985,7 @@ impl Screen {
     }
 
     fn scroll_down(&mut self, n: usize) {
-        for _ in 0..n {
-            if self.top > self.bottom { break; }
+        for _ in 0..n.min(self.region_rows()) {
             let blank = self.blank();
             let line = vec![blank; self.cols];
             self.grid.remove(self.bottom);
