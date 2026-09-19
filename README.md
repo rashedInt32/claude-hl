@@ -46,6 +46,9 @@ That's it. There's nothing to configure.
 | `CLAUDE_HL_COLORS=cmd=89b4fa,num=fab387` | Override single slots of the theme. Slots: `cmd sub flag string path op num var url comment tool err warn ok` |
 | `CLAUDE_HL_CODE_BG=2a2a3a` | Draw a background behind inline code, GitHub style. Off by default |
 | `CLAUDE_HL_COMMANDS="bash sh -make"` | Grow the vocabulary without a rebuild. `word` adds a command, `word:sub` adds one that takes subcommands (`just:sub`), `-word` removes one |
+| `CLAUDE_HL_PRIVATE=435872` | One colour for Claude's private notes, instead of half the text colour |
+| `CLAUDE_HL_BOTTOM_LINE=head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb` | Colour a `Bottom line` summary block: the heading and each `Verified:`, `Issue:` and `Fix:` label in bold, and the plain text under them. Leave a slot out to keep that part as drawn; one bare `rrggbb` colours the heading and all labels. Off by default |
+| `CLAUDE_HL_FG=94a4b6` | Your terminal's text colour, so private notes can be drawn at half of it. Only needed where the terminal won't report it, such as inside tmux |
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
 | `CLAUDE_HL_DUMP=/tmp/hl.bin` | Append the raw PTY stream to a file, for bug reports |
@@ -65,6 +68,23 @@ with a custom theme. The markdown renderer looks the theme up by name and never
 sees your overrides. claude-hl already knows every cell's colour, so it swaps
 that lavender for something that fits each theme. Set your own pair if you
 disagree with the pick.
+
+### Why is a paragraph faint?
+
+Claude Code sometimes prints its own planning note, a paragraph that opens with
+`Private` or `Privately` and sits between blank rows. claude-hl draws that
+whole paragraph in italic at half brightness, so the real answer stands out.
+`CLAUDE_HL_PRIVATE` swaps half brightness for a colour of your choice. It asks your
+terminal for its text colour to do that. tmux won't say, so set
+`CLAUDE_HL_FG` there; without it you get the terminal's own faint style.
+
+### Colouring a Bottom line summary
+
+If your instructions have Claude open replies with a `Bottom line` heading and
+`Verified:`, `Issue:` and `Fix:` lines under it, `CLAUDE_HL_BOTTOM_LINE` paints
+that block down to the next blank row. The heading and each label turn bold in
+their own colour and the sentences take `text`, so each line is easy to find.
+Commands, paths and inline code inside keep their usual colours.
 
 ## Why not a custom frontend?
 

@@ -7,6 +7,10 @@
 //!   CLAUDE_HL_COLORS=cmd=89b4fa,num=fab387 claude-hl   # override single slots of the theme
 //!   CLAUDE_HL_CODE_BG=2a2a3a claude-hl                  # background behind inline code
 //!   CLAUDE_HL_COMMANDS="bash sh -make" claude-hl        # add words to the vocabulary, `-word` removes
+//!   CLAUDE_HL_PRIVATE=435872 claude-hl   # colour for Claude's private notes (default: half the text colour)
+//!   CLAUDE_HL_BOTTOM_LINE=head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb claude-hl
+//!                                        # colours for a "Bottom line" summary block (default: off)
+//!   CLAUDE_HL_FG=94a4b6 claude-hl        # terminal text colour, for half-bright private notes (tmux)
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   claude-hl --selftest                 # print sample highlighted text
 //!   claude-hl --themes                   # preview every theme
@@ -104,6 +108,117 @@ const NCOLORS: usize = 15;
 /// no fg override, but the cell is inline code and gets `code_bg()`
 const CODE_BG_ONLY: u8 = 15;
 const REMAP_BASE: u8 = 16;
+/// draw the cell's own (remapped) fg at half brightness, see `block_rows()`
+const PRIVATE: u8 = 255;
+/// the `Bottom line` heading, the rows under it, and the three labels those
+/// rows open with; see `block_rows()` and `Bottom`
+const BOTTOM_HEAD: u8 = 254;
+const BOTTOM_TEXT: u8 = 253;
+const BOTTOM_VERIFIED: u8 = 252;
+const BOTTOM_ISSUE: u8 = 251;
+const BOTTOM_FIX: u8 = 250;
+/// the words a `Bottom line` row may open with, and the code each one paints
+const BOTTOM_LABELS: [(&str, u8); 3] = [("Verified:", BOTTOM_VERIFIED), ("Issue:", BOTTOM_ISSUE), ("Fix:", BOTTOM_FIX)];
+
+/// The terminal's default foreground, asked for at startup (OSC 10). Cells
+/// the app draws in no colour show this one.
+static TERM_FG: OnceLock<[u8; 3]> = OnceLock::new();
+
+/// Colour of the cells the app draws in no colour: `CLAUDE_HL_FG=rrggbb`,
+/// else the terminal's OSC 10 answer. tmux does not answer, hence the knob.
+fn default_fg() -> Option<[u8; 3]> {
+    static E: OnceLock<Option<[u8; 3]>> = OnceLock::new();
+    E.get_or_init(|| env_fg("CLAUDE_HL_FG").and_then(|p| rgb_of(&p))).or_else(|| TERM_FG.get().copied())
+}
+
+/// SGR params for the `rrggbb` in env `var`; a bad value is reported and ignored.
+fn env_fg(var: &str) -> Option<String> {
+    let v = std::env::var(var).ok()?;
+    let h = v.trim().trim_start_matches('#');
+    if valid_hex(h) { return Some(fg_params(h)); }
+    if !h.is_empty() { eprintln!("claude-hl: ignoring {var}={h:?}, want rrggbb"); }
+    None
+}
+
+/// `CLAUDE_HL_PRIVATE=rrggbb`: one colour for every private note (SGR params).
+fn private_fg() -> Option<&'static str> {
+    static P: OnceLock<Option<String>> = OnceLock::new();
+    P.get_or_init(|| env_fg("CLAUDE_HL_PRIVATE")).as_deref()
+}
+
+/// Colours for the `Bottom line` block, as SGR params; an unset slot leaves
+/// that part as Claude Code drew it.
+#[derive(Default, Debug, PartialEq)]
+struct Bottom { head: Option<String>, verified: Option<String>, issue: Option<String>, fix: Option<String>, text: Option<String> }
+
+impl Bottom {
+    /// SGR params for a block colour code: the heading and labels are bold.
+    fn sgr(&self, code: u8) -> String {
+        let (fg, bold) = match code {
+            BOTTOM_HEAD => (&self.head, true),
+            BOTTOM_VERIFIED => (&self.verified, true),
+            BOTTOM_ISSUE => (&self.issue, true),
+            BOTTOM_FIX => (&self.fix, true),
+            _ => (&self.text, false),
+        };
+        match (fg.as_deref(), bold) {
+            (Some(f), true) => format!("1;{f}"),
+            (Some(f), false) => f.to_string(),
+            (None, true) => "1".to_string(),
+            (None, false) => String::new(),
+        }
+    }
+}
+
+/// `CLAUDE_HL_BOTTOM_LINE`, parsed. Unset or empty turns the block off.
+fn bottom() -> Option<&'static Bottom> {
+    static B: OnceLock<Option<Bottom>> = OnceLock::new();
+    B.get_or_init(|| std::env::var("CLAUDE_HL_BOTTOM_LINE").ok().filter(|s| !s.trim().is_empty()).map(|s| parse_bottom(&s)))
+        .as_ref()
+}
+
+/// `head=rrggbb,verified=…,issue=…,fix=…,text=…` with any slots left out, or
+/// one bare `rrggbb` for the heading and all three labels.
+fn parse_bottom(spec: &str) -> Bottom {
+    let mut b = Bottom::default();
+    let bare = spec.trim().trim_start_matches('#');
+    if valid_hex(bare) {
+        let p = fg_params(bare);
+        for slot in [&mut b.head, &mut b.verified, &mut b.issue, &mut b.fix] { *slot = Some(p.clone()); }
+        return b;
+    }
+    for pair in spec.split(',').filter(|p| !p.trim().is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let v = v.trim().trim_start_matches('#');
+        let slot = match k.trim() {
+            "head" => &mut b.head, "verified" => &mut b.verified, "issue" => &mut b.issue,
+            "fix" => &mut b.fix, "text" => &mut b.text,
+            _ => { eprintln!("claude-hl: ignoring CLAUDE_HL_BOTTOM_LINE entry {pair:?} (slots: head verified issue fix text)"); continue }
+        };
+        if valid_hex(v) { *slot = Some(fg_params(v)); }
+        else { eprintln!("claude-hl: ignoring CLAUDE_HL_BOTTOM_LINE entry {pair:?}, want rrggbb"); }
+    }
+    b
+}
+
+/// SGR params for a private-note cell whose own fg is `fg` (`rgb` once
+/// resolved): italic, in `fixed` when set, else at half its own colour.
+fn private_sgr(fixed: Option<&str>, fg: &str, rgb: Option<[u8; 3]>) -> String {
+    let colour = match (fixed, rgb) {
+        (Some(p), _) => p.to_string(),
+        (None, Some([r, g, b])) => format!("38;2;{};{};{}", r / 2, g / 2, b / 2),
+        // colour unknown: the terminal's own faint is the best guess
+        (None, None) if fg.is_empty() => "2".to_string(),
+        (None, None) => format!("2;{fg}"),
+    };
+    format!("3;{colour}")
+}
+
+/// `[r, g, b]` of a truecolor fg such as `38;2;148;165;182`.
+fn rgb_of(fg: &str) -> Option<[u8; 3]> {
+    let mut it = fg.strip_prefix("38;2;")?.split(';').map(|v| v.parse::<u8>().ok());
+    Some([it.next()??, it.next()??, it.next()??])
+}
 
 /// `38;2;r;g;b` for a hex colour (SGR params, no ESC).
 fn fg_params(h: &str) -> String {
@@ -841,6 +956,20 @@ impl Attr {
         s.push('m');
         s
     }
+
+    /// The SGR for a cell of this attribute painted with colour `code`.
+    fn paint(&self, code: u8) -> String {
+        let bg = if self.fg == codespan_fg() { code_bg() } else { "" };
+        match code {
+            PRIVATE => {
+                let fg = remaps().iter().find(|(from, _)| *from == self.fg).map_or(self.fg.as_str(), |(_, to)| to);
+                let rgb = if fg.is_empty() { default_fg() } else { rgb_of(fg) };
+                self.render_bg(&private_sgr(private_fg(), fg, rgb), bg)
+            }
+            BOTTOM_FIX..=BOTTOM_HEAD => self.render_bg(&bottom().map_or_else(String::new, |b| b.sgr(code)), bg),
+            _ => self.render_bg(code_sgr(code), bg),
+        }
+    }
 }
 
 // ---- screen model ----------------------------------------------------------
@@ -1280,9 +1409,50 @@ impl Screen {
         cell_of.push(self.cols);
     }
 
+    /// Per row, the block Claude Code drew it in, as the colour code to paint
+    /// it with: `PRIVATE` for a paragraph that opens with the word `Private`
+    /// or `Privately` (Claude's own planning note); `BOTTOM_HEAD` for a row
+    /// reading just `Bottom line` and `BOTTOM_TEXT` for the rows under it, when
+    /// `bottom` is on; else 0. Both open below a blank row, bullet or not,
+    /// and end at a blank row or the next `⏺`.
+    fn block_rows(&self, bottom: bool) -> Vec<u8> {
+        let mut out = vec![0; self.rows];
+        // `gap` is a blank row inside a block: Claude Code sometimes leaves one
+        // under the heading, so only a label row resumes the block after it
+        let (mut on, mut prev_blank, mut gap) = (0, true, false);
+        for (r, row) in self.grid.iter().enumerate() {
+            let lead: String = row.iter().filter(|c| !c.cont).map(|c| c.ch).skip_while(|&ch| ch == ' ').take(16).collect();
+            if lead.is_empty() { gap = on != 0; prev_blank = true; continue; }
+            if lead.starts_with('⏺') { on = 0; gap = false; }
+            let body = lead.trim_start_matches(['⏺', ' ']);
+            if gap {
+                let label = body.trim_start_matches(['-', '•', ' ']);
+                if !BOTTOM_LABELS.iter().any(|(word, _)| label.starts_with(word)) { on = 0; }
+                gap = false;
+            }
+            let private = body.strip_prefix("Private")
+                .map(|rest| rest.strip_prefix("ly").unwrap_or(rest))
+                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()));
+            // the heading is the whole row, so prose opening with the words stays plain
+            let heading = bottom && body.starts_with("Bottom line") && {
+                let full: String = row.iter().filter(|c| !c.cont).map(|c| c.ch).collect();
+                full.trim().trim_start_matches(['⏺', ' ']).strip_prefix("Bottom line")
+                    .is_some_and(|rest| rest.trim_end_matches([':', ' ']).is_empty())
+            };
+            out[r] = match (prev_blank, private, heading) {
+                (true, _, true) => { on = BOTTOM_TEXT; BOTTOM_HEAD }
+                (true, true, _) => { on = PRIVATE; PRIVATE }
+                _ => on,
+            };
+            prev_blank = false;
+        }
+        out
+    }
+
     /// Colour code wanted for every cell of row `r`: remaps first, then the
-    /// tokenizer's spans on top, then wide-char continuations follow their head.
-    fn desired_row(&mut self, r: usize, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
+    /// tokenizer's spans on top, then the row's `block` (see `block_rows()`)
+    /// over both, then wide-char continuations follow their head.
+    fn desired_row(&mut self, r: usize, block: u8, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
         self.row_text(r, text, cell_of, ctx);
         self.spans_buf.clear();
         spans(text, ctx, &mut self.spans_buf);
@@ -1300,6 +1470,21 @@ impl Screen {
             let (cs, ce) = (cell_of[s], cell_of[e]);
             for d in desired.iter_mut().take(ce).skip(cs) { *d = color as u8; }
         }
+        // trailing blanks look the same in any colour, so they are left alone
+        let end = self.grid[r].iter().rposition(|c| c.ch != ' ').map_or(0, |i| i + 1);
+        match block {
+            0 => {}
+            BOTTOM_TEXT => {
+                // plain text takes the block's text colour; tokens and inline code keep theirs
+                for d in &mut desired[..end] { if *d == 0 { *d = BOTTOM_TEXT; } }
+                let lead = text.len() - text.trim_start_matches([' ', '-', '•']).len();
+                let label = BOTTOM_LABELS.into_iter().find(|(word, _)| text[lead..].starts_with(word));
+                if let Some((word, code)) = label {
+                    for d in &mut desired[cell_of[lead]..cell_of[lead + word.len()]] { *d = code; }
+                }
+            }
+            _ => for d in &mut desired[..end] { *d = block; },
+        }
         for c in 1..self.cols { if self.grid[r][c].cont { desired[c] = desired[c - 1]; } }
     }
 
@@ -1313,13 +1498,20 @@ impl Screen {
         let (mut text, mut cell_of, mut code) = (String::new(), Vec::new(), Vec::new());
         let mut desired: Vec<u8> = Vec::new();
         let mut wrote = false;
+        if !self.dirty.contains(&true) { return; }
+        // a block's opening row can change after the rows below it are
+        // drawn, so those rows repaint too, clean or not
+        let blocks = self.block_rows(bottom().is_some());
         // unchanged cells between two runs cost less to rewrite than a
         // cursor move plus a fresh SGR, so short gaps join the run
         const GAP: usize = 3;
-        for r in 0..self.rows {
-            if !self.dirty[r] { continue; }
+        for (r, &block) in blocks.iter().enumerate() {
+            // body rows mix label, token and text codes, so only never-painted cells count there
+            let late = block != 0 && self.grid[r].iter()
+                .any(|c| c.ch != ' ' && if block == BOTTOM_TEXT { c.shown == 0 } else { c.shown != block });
+            if !self.dirty[r] && !late { continue; }
             self.dirty[r] = false;
-            self.desired_row(r, &mut desired, &mut text, &mut cell_of, &mut code);
+            self.desired_row(r, block, &mut desired, &mut text, &mut cell_of, &mut code);
             let stale = |c: usize, row: &[Cell]| desired[c] != row[c].shown || row[c].cont;
             let mut c = 0;
             while c < self.cols {
@@ -1335,8 +1527,7 @@ impl Screen {
                             None => true,
                         };
                         if need {
-                            let bg = if cell.attr.fg == codespan_fg() { code_bg() } else { "" };
-                            seg.push_str(&cell.attr.render_bg(code_sgr(desired[c]), bg));
+                            seg.push_str(&cell.attr.paint(desired[c]));
                             last_attr = Some((cell.attr.clone(), desired[c]));
                         }
                         seg.push(cell.ch);
@@ -1366,8 +1557,9 @@ impl Screen {
         let (mut text, mut cell_of, mut code) = (String::new(), Vec::new(), Vec::new());
         let mut desired: Vec<u8> = Vec::new();
         let last_row = (0..self.rows).rev().find(|&r| self.grid[r].iter().any(|c| c.ch != ' ')).map_or(0, |r| r + 1);
-        for r in 0..last_row {
-            self.desired_row(r, &mut desired, &mut text, &mut cell_of, &mut code);
+        let blocks = self.block_rows(bottom().is_some());
+        for (r, &block) in blocks.iter().enumerate().take(last_row) {
+            self.desired_row(r, block, &mut desired, &mut text, &mut cell_of, &mut code);
             let end = self.grid[r].iter().rposition(|c| c.ch != ' ').map_or(0, |i| i + 1);
             let mut last: Option<(Rc<Attr>, u8)> = None;
             for c in 0..end {
@@ -1375,8 +1567,7 @@ impl Screen {
                 if cell.cont { continue; }
                 let need = match &last { Some((a, col)) => **a != *cell.attr || *col != desired[c], None => true };
                 if need {
-                    let bg = if cell.attr.fg == codespan_fg() { code_bg() } else { "" };
-                    s.push_str(&cell.attr.render_bg(code_sgr(desired[c]), bg));
+                    s.push_str(&cell.attr.paint(desired[c]));
                     last = Some((cell.attr.clone(), desired[c]));
                 }
                 s.push(cell.ch);
@@ -1461,9 +1652,31 @@ fn write_all(fd: libc::c_int, mut buf: &[u8]) -> bool {
     true
 }
 
-/// Ask the real terminal where the cursor is (DSR). Returns (row, col, leftover stdin bytes).
+/// Pull an OSC 10 reply (`ESC ] 10 ; rgb:RRRR/GGGG/BBBB`, ended by BEL or
+/// ST) out of `buf` and return its colour.
+fn take_osc_fg(buf: &mut Vec<u8>) -> Option<[u8; 3]> {
+    const HEAD: &[u8] = b"\x1b]10;rgb:";
+    let s = buf.windows(HEAD.len()).position(|w| w == HEAD)?;
+    let body = s + HEAD.len();
+    let end = body + buf[body..].iter().position(|&b| b == 0x07 || b == 0x1b)?;
+    let mut rgb = [0u8; 3];
+    let mut parts = std::str::from_utf8(&buf[body..end]).ok()?.split('/');
+    for c in &mut rgb {
+        // 1 to 4 hex digits per channel, scaled to 8 bits
+        let p = parts.next().filter(|p| (1..=4).contains(&p.len()))?;
+        *c = (u32::from_str_radix(p, 16).ok()? * 255 / ((1 << (4 * p.len())) - 1)) as u8;
+    }
+    let term = if buf[end] == 0x07 { 1 } else { 2 };
+    buf.drain(s..(end + term).min(buf.len()));
+    Some(rgb)
+}
+
+/// Ask the real terminal where the cursor is (DSR) and, on the way, its
+/// default foreground (OSC 10, kept in `TERM_FG`). The DSR goes last, so any
+/// OSC reply has arrived by the time its answer does; a terminal that
+/// ignores OSC 10 still answers the DSR. Returns (row, col, leftover stdin bytes).
 fn query_cursor(stdin: libc::c_int, stdout: libc::c_int) -> (Option<(usize, usize)>, Vec<u8>) {
-    write_all(stdout, b"\x1b[6n");
+    write_all(stdout, b"\x1b]10;?\x1b\\\x1b[6n");
     let mut acc: Vec<u8> = Vec::new();
     let mut buf = [0u8; 256];
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
@@ -1492,9 +1705,11 @@ fn query_cursor(stdin: libc::c_int, stdout: libc::c_int) -> (Option<(usize, usiz
             let col = it.next().unwrap_or(1).max(1) - 1;
             let mut left = acc[..s].to_vec();
             left.extend_from_slice(&tail[e + 1..]);
+            if let Some(fg) = take_osc_fg(&mut left) { let _ = TERM_FG.set(fg); }
             return (Some((row, col)), left);
         }
     }
+    let _ = take_osc_fg(&mut acc);
     (None, acc)
 }
 
@@ -1913,10 +2128,113 @@ mod tests {
     fn remapped_foreground_is_wanted_even_in_prose() {
         let mut sc = screen(1, 20, "\x1b[38;2;177;185;249mfoo\x1b[39m bar");
         let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
-        sc.desired_row(0, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(0, 0, &mut d, &mut t, &mut c, &mut k);
         assert_eq!(d[0], REMAP_BASE);
         assert_eq!(d[4], 0);
         assert_eq!(k[0..3], [CTX_CODE, CTX_CODE, CTX_CODE]);
+    }
+
+    #[test]
+    fn private_paragraph_spans_blank_to_blank() {
+        let sc = screen(8, 40, "⏺ Done.\r\n\r\n⏺ Privately, what I need\r\n  next: git status\r\n\r\nafter\r\ntext\r\nPrivately not a new paragraph");
+        const P: u8 = PRIVATE;
+        assert_eq!(sc.block_rows(false), [0, 0, P, P, 0, 0, 0, 0]);
+        let sc = screen(3, 40, "Privately, a note\r\n⏺ Bash(ls)\r\n  ⎿  out");
+        assert_eq!(sc.block_rows(false), [P, 0, 0]);
+        let sc = screen(5, 40, "⏺ Private note: x\r\n\r\n  Private\r\n\r\n⏺ Privateer ships");
+        assert_eq!(sc.block_rows(false), [P, 0, P, 0, 0]);
+    }
+
+    #[test]
+    fn bottom_line_block_runs_to_the_blank_row() {
+        let (h, b) = (BOTTOM_HEAD, BOTTOM_TEXT);
+        let sc = screen(8, 60, "\r\n⏺ Bottom line\r\n  - Verified: 140ms\r\n  - Issue: RVM, and a line\r\n    that wraps\r\n  - Fix: cached\r\n\r\n  What changed");
+        assert_eq!(sc.block_rows(true), [0, h, b, b, b, b, 0, 0]);
+        assert_eq!(sc.block_rows(false), [0; 8], "off unless a colour is set");
+        let sc = screen(5, 60, "\r\n  Bottom line:\r\n  Verified: ok\r\n\r\n⏺ Bottom line, the build passes");
+        assert_eq!(sc.block_rows(true), [0, h, b, 0, 0]);
+        let sc = screen(3, 60, "\r\n⏺ Bottom line          is prose\r\n  more");
+        assert_eq!(sc.block_rows(true), [0, 0, 0]);
+        // Claude Code sometimes leaves a blank row under the heading
+        let sc = screen(7, 60, "\r\n⏺ Bottom line\r\n\r\n  Verified: ok\r\n  Issue: x\r\n\r\n  What changed");
+        assert_eq!(sc.block_rows(true), [0, h, 0, b, b, 0, 0]);
+        let sc = screen(5, 60, "\r\n⏺ Bottom line\r\n  - Verified: a\r\n\r\n  - Fix: b");
+        assert_eq!(sc.block_rows(true), [0, h, b, 0, b], "a blank row between items");
+        let sc = screen(4, 60, "\r\n⏺ Bottom line\r\n\r\n  Some other prose");
+        assert_eq!(sc.block_rows(true), [0, h, 0, 0], "only a label row resumes the block");
+    }
+
+    #[test]
+    fn bottom_line_colours_the_heading_labels_and_plain_text() {
+        let b = parse_bottom("head=5eead4, verified=#bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb");
+        assert_eq!(b.sgr(BOTTOM_HEAD), "1;38;2;94;234;212");
+        assert_eq!(b.sgr(BOTTOM_VERIFIED), "1;38;2;190;242;100");
+        assert_eq!(b.sgr(BOTTOM_ISSUE), "1;38;2;255;158;138");
+        assert_eq!(b.sgr(BOTTOM_FIX), "1;38;2;240;171;252");
+        assert_eq!(b.sgr(BOTTOM_TEXT), "38;2;214;222;235");
+        let one = parse_bottom("#7ef2a8");
+        assert_eq!((one.sgr(BOTTOM_ISSUE), one.sgr(BOTTOM_TEXT)), ("1;38;2;126;242;168".to_string(), String::new()));
+        assert_eq!(parse_bottom("head=zz,bogus=112233"), Bottom::default());
+        let mut sc = screen(3, 40, "\r\n⏺ Bottom line\r\n  - Fix: run \x1b[38;2;177;185;249mnpm\x1b[39m now");
+        let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
+        sc.desired_row(2, BOTTOM_TEXT, &mut d, &mut t, &mut c, &mut k);
+        assert_eq!(d[4..8], [BOTTOM_FIX; 4], "the label: {d:?}");
+        assert_eq!((d[0], d[2], d[17]), (BOTTOM_TEXT, BOTTOM_TEXT, BOTTOM_TEXT), "plain text: {d:?}");
+        assert!(d[13] != 0 && d[13] != BOTTOM_TEXT, "inline code keeps its colour: {d:?}");
+        assert_eq!(d[20], 0, "trailing blanks");
+    }
+
+    #[test]
+    fn private_notes_are_italic_in_a_set_or_half_colour() {
+        let (steel, own) = (fg_params("435872"), "38;2;148;165;182");
+        assert_eq!(private_sgr(Some(&steel), own, rgb_of(own)), "3;38;2;67;88;114");
+        assert_eq!(private_sgr(Some(&steel), "", None), "3;38;2;67;88;114");
+        assert_eq!(private_sgr(None, own, rgb_of(own)), "3;38;2;74;82;91");
+        assert_eq!(private_sgr(None, "33", None), "3;2;33", "palette colour: terminal faint");
+        assert_eq!(private_sgr(None, "", None), "3;2");
+        let mut a = Attr::default();
+        a.apply(&[1]);
+        assert_eq!(a.render_bg(&private_sgr(Some(&steel), "", None), ""), "\x1b[0;1;3;38;2;67;88;114m");
+    }
+
+    #[test]
+    fn osc_fg_reply_is_parsed_and_removed() {
+        let mut b = b"k\x1b]10;rgb:9494/a4a4/b6b6\x1b\\j".to_vec();
+        assert_eq!(take_osc_fg(&mut b), Some([0x94, 0xa4, 0xb6]));
+        assert_eq!(b, b"kj");
+        let mut b = b"\x1b]10;rgb:f/80/0\x07".to_vec();
+        assert_eq!(take_osc_fg(&mut b), Some([255, 0x80, 0]));
+        assert!(b.is_empty());
+        let mut b = b"\x1b]10;rgb:zz/00/00\x07".to_vec();
+        assert_eq!(take_osc_fg(&mut b), None);
+    }
+
+    #[test]
+    fn private_paragraph_paints_faint_over_tokens() {
+        let mut sc = screen(4, 40, "\r\n⏺ Privately, next\r\n  git status --short\r\n");
+        let mut out = Vec::new();
+        sc.repaint(&mut out);
+        let s = String::from_utf8(out).unwrap();
+        let p = Attr::default().paint(PRIVATE);
+        assert!(s.contains(&format!("\x1b[2;1H{p}⏺ Privately, next\x1b[3;1H{p}  git status --short")), "{s:?}");
+        assert!(!s.contains(&palette()[Color::Cmd as usize]), "no token colour inside: {s:?}");
+    }
+
+    #[test]
+    fn private_opening_row_repaints_rows_below() {
+        let mut sc = screen(3, 40, "\r\n⏺ Priv\r\n  rest of it");
+        let mut out = Vec::new();
+        sc.repaint(&mut out);
+        assert!(out.is_empty());
+        sc.feed(b"\x1b[2;7Hately");
+        sc.repaint(&mut out);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(&format!("\x1b[3;1H{}  rest", Attr::default().paint(PRIVATE))), "clean row below repaints: {s:?}");
+        let (mut out, mut d, mut t, mut c, mut k) = (Vec::new(), Vec::new(), String::new(), Vec::new(), Vec::new());
+        sc.repaint(&mut out);
+        assert!(out.is_empty(), "painted once");
+        sc.desired_row(2, PRIVATE, &mut d, &mut t, &mut c, &mut k);
+        assert_eq!((d[0], d[11], d[12]), (PRIVATE, PRIVATE, 0));
     }
 
     #[test]
