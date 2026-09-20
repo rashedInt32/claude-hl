@@ -10,6 +10,10 @@
 //!   CLAUDE_HL_PRIVATE=435872 claude-hl   # colour for Claude's private notes (default: half the text colour)
 //!   CLAUDE_HL_BOTTOM_LINE=head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb claude-hl
 //!                                        # colours for a "Bottom line" summary block (default: off)
+//!   CLAUDE_HL_MARK=1 claude-hl           # gutter mark beside paragraphs that ask something of you
+//!                                        # (1 for the theme's warn colour, or rrggbb; default: off)
+//!   CLAUDE_HL_DIM=1 claude-hl            # the other prose paragraphs at half brightness
+//!                                        # (1 for half of each colour, or rrggbb; default: off)
 //!   CLAUDE_HL_FG=94a4b6 claude-hl        # terminal text colour, for half-bright private notes (tmux)
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   claude-hl --selftest                 # print sample highlighted text
@@ -23,10 +27,18 @@
 //! absolute cursor moves; the cursor and attributes are then restored.
 //! This survives renderers that stream a line in pieces (Claude Code does).
 //! Width is never changed, so the TUI layout survives.
+//!
+//! Marks and dimming need Claude's text as written, not as it wrapped on
+//! screen. With either on, Claude starts with a session-only plugin whose
+//! MessageDisplay hook is `claude-hl --hook`. Claude Code runs it with each
+//! batch of lines just before drawing them; the hook relays the batch over a
+//! socket in a private temp dir, and the wrapper labels every paragraph from
+//! the markdown and files it under its first letters. When the rows appear,
+//! they are matched by the same letters and painted in the same write.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
@@ -117,6 +129,17 @@ const BOTTOM_TEXT: u8 = 253;
 const BOTTOM_VERIFIED: u8 = 252;
 const BOTTOM_ISSUE: u8 = 251;
 const BOTTOM_FIX: u8 = 250;
+/// column 0 of a paragraph that needs the reader: a `▎` in the mark colour,
+/// or the `⏺` bullet recoloured when it sits there
+const MARK: u8 = 249;
+const MARK_GLYPH: char = '▎';
+/// a prose paragraph nothing is asked about, at half brightness (`CLAUDE_HL_DIM`)
+const DIM: u8 = 248;
+/// what a paragraph of Claude's prose is, from `Labels`
+const ROW_OTHER: u8 = 0; // not prose, or never labelled: left as drawn
+const ROW_PROSE: u8 = 1; // prose nothing is asked about: dimmed when `CLAUDE_HL_DIM` is set
+const ROW_MARK: u8 = 2; // needs the reader: gutter mark
+const ROW_KEEP: u8 = 3; // something Claude was asked to write: never marked, never dimmed
 /// the words a `Bottom line` row may open with, and the code each one paints
 const BOTTOM_LABELS: [(&str, u8); 3] = [("Verified:", BOTTOM_VERIFIED), ("Issue:", BOTTOM_ISSUE), ("Fix:", BOTTOM_FIX)];
 
@@ -144,6 +167,366 @@ fn env_fg(var: &str) -> Option<String> {
 fn private_fg() -> Option<&'static str> {
     static P: OnceLock<Option<String>> = OnceLock::new();
     P.get_or_init(|| env_fg("CLAUDE_HL_PRIVATE")).as_deref()
+}
+
+/// `CLAUDE_HL_MARK`: SGR params for the gutter mark. `rrggbb` picks the
+/// colour; any other non-empty value uses the theme's warn colour. Unset or
+/// empty turns marks off.
+fn mark_sgr() -> Option<&'static str> {
+    static M: OnceLock<Option<String>> = OnceLock::new();
+    M.get_or_init(|| {
+        let v = std::env::var("CLAUDE_HL_MARK").ok()?;
+        let h = v.trim().trim_start_matches('#');
+        if h.is_empty() { return None; }
+        Some(if valid_hex(h) { fg_params(h) } else { palette()[Color::Warn as usize].clone() })
+    }).as_deref()
+}
+
+/// `CLAUDE_HL_DIM`: draw prose paragraphs nothing is asked about at half
+/// brightness. `Some(None)` halves each cell's own colour; `Some(Some(params))`
+/// is a fixed `rrggbb`; `None` is off.
+fn dim_fg() -> Option<Option<&'static str>> {
+    static D: OnceLock<Option<Option<String>>> = OnceLock::new();
+    D.get_or_init(|| {
+        let v = std::env::var("CLAUDE_HL_DIM").ok()?;
+        let h = v.trim().trim_start_matches('#');
+        if h.is_empty() { return None; }
+        Some(valid_hex(h).then(|| fg_params(h)))
+    }).as_ref().map(Option::as_deref)
+}
+
+// ---- what each paragraph asks of the reader --------------------------------
+
+/// Phrases that make a paragraph one the reader must act on or decide about.
+/// Matched on whole words after lowercasing; a trailing `*` matches any
+/// continuation of the last word (`fail*` takes `fails`, `failed`, `failing`).
+const ATTENTION: &[&str] = &[
+    // asks of the reader
+    "you need", "you'll need", "you must", "you should", "you have to", "you may want", "you might want",
+    "you can't", "you cannot", "don't forget", "your call", "up to you", "let me know",
+    "do you want", "should i", "which one", "manually", "by hand", "before you", "if you want", "on your machine",
+    "your machine", "your terminal", "yourself", "restart", "reboot", "reinstall", "re-run", "rerun", "log in",
+    "sign in",
+    // what did not happen
+    "not verif*", "can't verify", "cannot verify", "could not verify", "couldn't verify", "unverified",
+    "untested", "not tested", "no tests", "i did not", "i didn't", "i haven't", "i could not", "i couldn't",
+    "skipped", "left out", "blocked", "not yet", "won't work", "will not work", "does not work", "doesn't work",
+    "still fail*", "keeps fail*", "regress*", "assum*",
+    // risk
+    "warning", "caution", "careful", "risk*", "danger*", "breaking", "irreversib*", "destructive", "data loss",
+    "backup", "security", "vulnerab*", "secret*", "credential*", "password*", "deprecat*", "caveat*", "however",
+    "important", "todo", "fixme",
+];
+
+/// Openers that make the paragraph an instruction to the reader.
+const IMPERATIVE: &[&str] = &[
+    "run", "set", "add", "install", "restart", "open", "check", "update", "remove", "delete", "replace",
+    "rename", "export", "copy", "paste", "change", "edit", "enable", "disable", "confirm", "review", "decide",
+    "choose", "pick", "try", "note", "beware", "remember", "don't", "do not", "never", "always", "please",
+    "make sure", "be sure",
+];
+
+/// Bold labels that open something Claude was asked to write out, such as
+/// `**Body:**` over a post or `**Subject:**` over an email.
+const DOC_LABELS: &[&str] = &[
+    "title", "subject", "body", "post", "draft", "email", "message", "caption", "tweet", "headline",
+    "tagline", "bio", "description", "text", "reply", "comment", "summary", "abstract", "cover letter",
+];
+
+/// Verbs near the front of a prompt that ask Claude to write something
+/// rather than do something: the reply is then the thing itself.
+const WRITE_WORDS: &[&str] = &[
+    "write", "draft", "compose", "reword", "rewrite", "rephrase", "translate", "proofread", "polish",
+    "shorten", "expand", "summarize", "summarise",
+];
+
+/// Whether a paragraph of Claude's prose needs the reader: it asks a
+/// question, opens with an instruction, or carries an `ATTENTION` phrase.
+fn needs_attention(text: &str) -> bool {
+    // normalise to ` word word ? word ` so phrases match on word boundaries
+    let mut norm = String::with_capacity(text.len() + 2);
+    norm.push(' ');
+    let mut in_word = false;
+    for c in text.chars() {
+        // a hyphen joins `re-run`; on its own it is a list marker or a dash
+        let keep = c.is_alphanumeric() || matches!(c, '\'' | '’') || c == '-' && in_word;
+        if keep {
+            for l in c.to_lowercase() { norm.push(if l == '’' { '\'' } else { l }); }
+            in_word = true;
+        } else {
+            if in_word { norm.push(' '); }
+            in_word = false;
+            if c == '?' { norm.push_str("? "); }
+        }
+    }
+    if in_word { norm.push(' '); }
+    if norm.contains(" ? ") { return true; }
+    if IMPERATIVE.iter().any(|w| norm[1..].starts_with(w) && norm[1 + w.len()..].starts_with(' ')) { return true; }
+    ATTENTION.iter().any(|p| match p.strip_suffix('*') {
+        Some(stem) => norm.contains(&format!(" {stem}")),
+        None => norm.contains(&format!(" {p} ")),
+    })
+}
+
+/// Whether a prompt asks Claude to write something: one of `WRITE_WORDS`
+/// among its first six words, as in "write me a post" or "can you draft an
+/// email".
+fn write_intent(prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    p.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(6).any(|w| WRITE_WORDS.contains(&w))
+}
+
+/// `**Body:**` or `**Title:** text` opening a paragraph: the label, lowercased.
+fn bold_label(t: &str) -> Option<String> {
+    let inner = t.strip_prefix("**")?;
+    let end = inner.find("**")?;
+    let label = inner[..end].trim_end();
+    let label = label.strip_suffix(':')?.trim();
+    (!label.is_empty() && label.len() <= 24).then(|| label.to_lowercase())
+}
+
+/// Whether a markdown line starts a list item: `- `, `* `, `+ `, `1. `, `1) `.
+fn list_item(t: &str) -> bool {
+    let digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+    matches!(t.as_bytes(), [b'-' | b'*' | b'+', b' ', ..])
+        || digits.len() < t.len() && matches!(digits.as_bytes(), [b'.' | b')', b' ', ..])
+}
+
+/// The label of one prose paragraph. A bold label such as `**Body:**` opens
+/// something Claude was asked to write, which runs to the end of the message
+/// as `ROW_KEEP`; `keep` carries that on. When the prompt itself asked for
+/// writing, the whole reply is the writing and every paragraph is kept: a
+/// question inside a drafted post asks nothing of the reader. Headings and
+/// rules are left as drawn. Otherwise `needs_attention()` decides.
+fn prose_label(text: &str, keep: &mut bool, writing: bool) -> u8 {
+    let t = text.trim_start();
+    if t.starts_with('#') || t.starts_with("---") || t.starts_with("***") { return ROW_OTHER; }
+    if bold_label(t).is_some_and(|label| DOC_LABELS.contains(&label.as_str())) { *keep = true; }
+    if *keep || writing { return ROW_KEEP; }
+    if needs_attention(t) { ROW_MARK } else { ROW_PROSE }
+}
+
+/// Where a paragraph split stands: inside a fenced code block, and inside
+/// something Claude was asked to write.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Mode { fence: bool, keep: bool }
+
+/// One paragraph of a message: where it starts, its text, its label, and
+/// the `Mode` it began in, so a split can resume from it.
+#[derive(Debug)]
+struct Para { at: usize, text: String, label: u8, mode: Mode }
+
+/// Split Claude's markdown into paragraphs and label each. A paragraph is a
+/// run of non-blank lines; every list item and every fenced code block is
+/// its own, and code is never prose.
+fn classify(md: &str, writing: bool, mut mode: Mode) -> Vec<Para> {
+    let mut out = Vec::new();
+    let mut para = String::new();
+    let (mut at, mut at_mode, mut off) = (0, mode, 0);
+    for line in md.split_inclusive('\n') {
+        let line_at = off;
+        off += line.len();
+        let line = line.trim_end_matches(['\n', '\r']);
+        let t = line.trim_start();
+        let fence_line = t.starts_with("```") || t.starts_with("~~~");
+        if mode.fence {
+            if !fence_line { para.push_str(line); para.push('\n'); continue; }
+            out.push(Para { at, text: std::mem::take(&mut para), label: ROW_OTHER, mode: at_mode });
+            mode.fence = false;
+            continue;
+        }
+        if (fence_line || t.is_empty() || list_item(t)) && !para.trim().is_empty() {
+            let label = prose_label(&para, &mut mode.keep, writing);
+            out.push(Para { at, text: std::mem::take(&mut para), label, mode: at_mode });
+        }
+        if t.is_empty() { continue; }
+        if para.is_empty() { at = line_at; at_mode = mode; }
+        if fence_line { mode.fence = true; continue; }
+        para.push_str(t);
+        para.push('\n');
+    }
+    if !para.trim().is_empty() {
+        let label = if mode.fence { ROW_OTHER } else { prose_label(&para, &mut mode.keep, writing) };
+        out.push(Para { at, text: para, label, mode: at_mode });
+    }
+    out
+}
+
+/// The key a paragraph is filed under: its first 32 letters and digits,
+/// lowercased. Markup, spacing and wrapping differ between the markdown the
+/// hook sees and the rows on screen; the letters do not.
+fn para_key(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).take(32).collect()
+}
+
+/// A hook payload, as far as claude-hl reads it.
+#[derive(Default, Debug, PartialEq)]
+struct HookMsg { event: String, message_id: String, delta: String, prompt: String }
+
+/// What each paragraph of Claude's prose is, keyed by `para_key`, as told by
+/// the MessageDisplay hook; the current message is kept whole so a paragraph
+/// that arrives in pieces is labelled from all of it.
+#[derive(Default)]
+struct Labels {
+    map: HashMap<String, u8>,
+    order: VecDeque<String>,
+    msg_id: String,
+    msg: String,
+    /// where the last paragraph of `msg` starts, and the `Mode` there: each
+    /// delta is split from that point, since only that paragraph can grow
+    done: usize,
+    mode: Mode,
+    /// the last prompt asked Claude to write something
+    writing: bool,
+}
+
+impl Labels {
+    /// paragraphs remembered; older ones have scrolled off any screen
+    const CAP: usize = 4096;
+    /// bytes of one message kept; more than this is not prose anyone reads
+    const MSG_MAX: usize = 1 << 20;
+
+    fn ingest(&mut self, m: &HookMsg) {
+        match m.event.as_str() {
+            "UserPromptSubmit" => self.writing = write_intent(&m.prompt),
+            "MessageDisplay" => {
+                if m.message_id != self.msg_id {
+                    self.msg_id = m.message_id.clone();
+                    self.msg.clear();
+                    (self.done, self.mode) = (0, Mode::default());
+                }
+                if self.msg.len() + m.delta.len() > Self::MSG_MAX { return; }
+                self.msg.push_str(&m.delta);
+                let paras = classify(&self.msg[self.done..], self.writing, self.mode);
+                for p in &paras { self.set(para_key(&p.text), p.label); }
+                if let Some(last) = paras.last() { (self.done, self.mode) = (self.done + last.at, last.mode); }
+            }
+            _ => {}
+        }
+    }
+
+    fn set(&mut self, key: String, label: u8) {
+        if key.is_empty() { return; }
+        if self.map.insert(key.clone(), label).is_none() {
+            self.order.push_back(key);
+            if self.order.len() > Self::CAP {
+                if let Some(old) = self.order.pop_front() { self.map.remove(&old); }
+            }
+        }
+    }
+
+    /// The label of the paragraph whose rows read `text`; `ROW_OTHER` when
+    /// the hook never saw it.
+    fn get(&self, text: &str) -> u8 { self.map.get(&para_key(text)).copied().unwrap_or(ROW_OTHER) }
+}
+
+// ---- a small JSON reader, for hook payloads --------------------------------
+
+/// A JSON value as far as hook payloads need: strings and booleans; anything
+/// else is parsed and dropped.
+#[derive(Debug, PartialEq)]
+enum Json { Str(String), Bool(bool), Other }
+
+struct JsonReader<'a> { s: &'a [u8], i: usize }
+
+impl JsonReader<'_> {
+    fn ws(&mut self) { while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) { self.i += 1; } }
+    fn peek(&self) -> Option<u8> { self.s.get(self.i).copied() }
+    fn byte(&mut self) -> Option<u8> { let b = self.peek()?; self.i += 1; Some(b) }
+    fn lit(&mut self, lit: &[u8]) -> Option<()> {
+        if self.s.get(self.i..)?.starts_with(lit) { self.i += lit.len(); Some(()) } else { None }
+    }
+    fn hex4(&mut self) -> Option<u32> {
+        let h = self.s.get(self.i..self.i + 4)?;
+        self.i += 4;
+        u32::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()
+    }
+    /// the rest of a string, after its opening quote
+    fn string(&mut self) -> Option<String> {
+        let mut out = Vec::new();
+        loop {
+            match self.byte()? {
+                b'"' => break,
+                b'\\' => match self.byte()? {
+                    b'"' => out.push(b'"'), b'\\' => out.push(b'\\'), b'/' => out.push(b'/'),
+                    b'b' => out.push(8), b'f' => out.push(12), b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'), b't' => out.push(b'\t'),
+                    b'u' => {
+                        let mut cp = self.hex4()?;
+                        if (0xD800..0xDC00).contains(&cp) {
+                            self.lit(b"\\u")?;
+                            let lo = self.hex4()?;
+                            if !(0xDC00..0xE000).contains(&lo) { return None; }
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        }
+                        let c = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                    }
+                    _ => return None,
+                },
+                b => out.push(b),
+            }
+        }
+        Some(String::from_utf8_lossy(&out).into_owned())
+    }
+    fn value(&mut self, depth: u32) -> Option<Json> {
+        if depth > 64 { return None; }
+        self.ws();
+        match self.peek()? {
+            b'"' => { self.i += 1; Some(Json::Str(self.string()?)) }
+            b't' => { self.lit(b"true")?; Some(Json::Bool(true)) }
+            b'f' => { self.lit(b"false")?; Some(Json::Bool(false)) }
+            b'n' => { self.lit(b"null")?; Some(Json::Other) }
+            b'[' => {
+                self.i += 1;
+                self.ws();
+                if self.peek()? == b']' { self.i += 1; return Some(Json::Other); }
+                loop {
+                    self.value(depth + 1)?;
+                    self.ws();
+                    match self.byte()? { b',' => {} b']' => return Some(Json::Other), _ => return None }
+                }
+            }
+            b'{' => { self.i += 1; self.object(depth + 1, None)?; Some(Json::Other) }
+            _ => {
+                let start = self.i;
+                while matches!(self.peek(), Some(b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')) { self.i += 1; }
+                if self.i == start { None } else { Some(Json::Other) }
+            }
+        }
+    }
+    /// an object's body, after `{`; with `keep`, its fields are collected
+    fn object(&mut self, depth: u32, mut keep: Option<&mut HashMap<String, Json>>) -> Option<()> {
+        self.ws();
+        if self.peek()? == b'}' { self.i += 1; return Some(()); }
+        loop {
+            self.ws();
+            if self.byte()? != b'"' { return None; }
+            let key = self.string()?;
+            self.ws();
+            if self.byte()? != b':' { return None; }
+            let v = self.value(depth)?;
+            if let Some(map) = keep.as_deref_mut() { map.insert(key, v); }
+            self.ws();
+            match self.byte()? { b',' => {} b'}' => return Some(()), _ => return None }
+        }
+    }
+}
+
+/// The top-level fields of a JSON object; `None` for anything malformed.
+fn json_fields(s: &[u8]) -> Option<HashMap<String, Json>> {
+    let mut r = JsonReader { s, i: 0 };
+    r.ws();
+    if r.byte()? != b'{' { return None; }
+    let mut map = HashMap::new();
+    r.object(1, Some(&mut map))?;
+    Some(map)
+}
+
+fn parse_hook(json: &[u8]) -> Option<HookMsg> {
+    let mut f = json_fields(json)?;
+    let mut s = |k: &str| match f.remove(k) { Some(Json::Str(v)) => v, _ => String::new() };
+    Some(HookMsg { event: s("hook_event_name"), message_id: s("message_id"), delta: s("delta"), prompt: s("prompt") })
 }
 
 /// Colours for the `Bottom line` block, as SGR params; an unset slot leaves
@@ -204,14 +587,19 @@ fn parse_bottom(spec: &str) -> Bottom {
 /// SGR params for a private-note cell whose own fg is `fg` (`rgb` once
 /// resolved): italic, in `fixed` when set, else at half its own colour.
 fn private_sgr(fixed: Option<&str>, fg: &str, rgb: Option<[u8; 3]>) -> String {
-    let colour = match (fixed, rgb) {
+    format!("3;{}", half_sgr(fixed, fg, rgb))
+}
+
+/// SGR params for a cell whose own fg is `fg` (`rgb` once resolved), in
+/// `fixed` when set, else at half its own colour.
+fn half_sgr(fixed: Option<&str>, fg: &str, rgb: Option<[u8; 3]>) -> String {
+    match (fixed, rgb) {
         (Some(p), _) => p.to_string(),
         (None, Some([r, g, b])) => format!("38;2;{};{};{}", r / 2, g / 2, b / 2),
         // colour unknown: the terminal's own faint is the best guess
         (None, None) if fg.is_empty() => "2".to_string(),
         (None, None) => format!("2;{fg}"),
-    };
-    format!("3;{colour}")
+    }
 }
 
 /// `[r, g, b]` of a truecolor fg such as `38;2;148;165;182`.
@@ -961,12 +1349,14 @@ impl Attr {
     fn paint(&self, code: u8) -> String {
         let bg = if self.fg == codespan_fg() { code_bg() } else { "" };
         match code {
-            PRIVATE => {
+            PRIVATE | DIM => {
                 let fg = remaps().iter().find(|(from, _)| *from == self.fg).map_or(self.fg.as_str(), |(_, to)| to);
                 let rgb = if fg.is_empty() { default_fg() } else { rgb_of(fg) };
-                self.render_bg(&private_sgr(private_fg(), fg, rgb), bg)
+                if code == PRIVATE { self.render_bg(&private_sgr(private_fg(), fg, rgb), bg) }
+                else { self.render_bg(&half_sgr(dim_fg().flatten(), fg, rgb), bg) }
             }
             BOTTOM_FIX..=BOTTOM_HEAD => self.render_bg(&bottom().map_or_else(String::new, |b| b.sgr(code)), bg),
+            MARK => self.render_bg(mark_sgr().unwrap_or(""), bg),
             _ => self.render_bg(code_sgr(code), bg),
         }
     }
@@ -1030,6 +1420,12 @@ struct Screen {
     autowrap: bool,
     alt: bool,
     enabled: bool,
+    /// prose paragraphs are painted by label (`CLAUDE_HL_MARK` or `CLAUDE_HL_DIM` set)
+    marks_on: bool,
+    /// what the MessageDisplay hook said each paragraph is
+    labels: Labels,
+    /// labels changed: repaint even with no row dirty
+    relabel: bool,
     dirty: Vec<bool>,
     /// main-screen state parked while the app is on the alternate screen
     main_saved: Option<(Vec<Vec<Cell>>, Vec<bool>, usize, usize, usize, usize, bool)>,
@@ -1052,6 +1448,8 @@ impl Screen {
             saved: (0, 0, attr.clone()),
             top: 0, bottom: rows.saturating_sub(1),
             attr, pending_wrap: false, autowrap: true, alt: false, enabled: true,
+            marks_on: mark_sgr().is_some() || dim_fg().is_some(),
+            labels: Labels::default(), relabel: false,
             dirty: vec![false; rows],
             main_saved: None,
             pst: PState::Ground, csi: Vec::new(), utf8: Vec::new(),
@@ -1452,7 +1850,7 @@ impl Screen {
     /// Colour code wanted for every cell of row `r`: remaps first, then the
     /// tokenizer's spans on top, then the row's `block` (see `block_rows()`)
     /// over both, then wide-char continuations follow their head.
-    fn desired_row(&mut self, r: usize, block: u8, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
+    fn desired_row(&mut self, r: usize, block: u8, prose: u8, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
         self.row_text(r, text, cell_of, ctx);
         self.spans_buf.clear();
         spans(text, ctx, &mut self.spans_buf);
@@ -1485,7 +1883,61 @@ impl Screen {
             }
             _ => for d in &mut desired[..end] { *d = block; },
         }
+        if prose == ROW_MARK && end > 0 { desired[0] = MARK; }
+        if prose == ROW_PROSE && dim_fg().is_some() { for d in &mut desired[..end] { *d = DIM; } }
         for c in 1..self.cols { if self.grid[r][c].cont { desired[c] = desired[c - 1]; } }
+    }
+
+    /// Per row, the label of the paragraph of Claude's prose it belongs to
+    /// (see `Labels`), or `ROW_OTHER`. A paragraph runs from a `⏺`, a blank
+    /// row or a list marker to the next of those. Tool calls, their output,
+    /// chrome, fully coloured rows and rows already in a block end a
+    /// paragraph and are never prose.
+    fn mark_rows(&self, blocks: &[u8]) -> Vec<u8> {
+        let mut out = vec![ROW_OTHER; self.rows];
+        let (mut unit, mut text): (Vec<usize>, String) = (Vec::new(), String::new());
+        let labels = &self.labels;
+        let flush = |unit: &mut Vec<usize>, text: &mut String, out: &mut Vec<u8>| {
+            let state = labels.get(text);
+            for &r in unit.iter() { out[r] = state; }
+            unit.clear(); text.clear();
+        };
+        let gray = secondary_fg();
+        let lead_of = |row: &Vec<Cell>| row.iter().filter(|c| !c.cont).map(|c| c.ch).collect::<String>();
+        // the input box is the last `>` row on screen; what you type wraps
+        // under it and looks like prose, so it and everything below stay out
+        let input = self.grid.iter().rposition(|row| {
+            let l = lead_of(row);
+            let l = l.trim_start().trim_start_matches(['│', '┃', ' ']);
+            l.starts_with(['>', '❯']) && !l.starts_with(">>")
+        }).unwrap_or(self.rows);
+        for (r, row) in self.grid.iter().enumerate() {
+            if r >= input { flush(&mut unit, &mut text, &mut out); break; }
+            let full = lead_of(row);
+            let lead = full.trim();
+            if lead.is_empty() { flush(&mut unit, &mut text, &mut out); continue; }
+            let bullet = lead.starts_with(['⏺', '●']);
+            let body = lead.trim_start_matches(['⏺', '●', ' ']);
+            let name = body.split('(').next().unwrap_or("");
+            let tool_call = bullet && !name.is_empty() && name.len() < body.len()
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let chrome = body.starts_with(['⎿', '╭', '│', '╰', '─', '┌', '└', '├', '✻', '✽', '✶', '·', '>']);
+            let coloured = row.iter().filter(|c| !c.cont && c.ch != ' ' && c.ch != '⏺').all(|c| !c.attr.fg.is_empty());
+            let boundary = blocks[r] != 0 || tool_call || chrome || coloured
+                || row.iter().any(|c| c.ch != ' ' && c.attr.fg == gray);
+            let mut it = body.chars();
+            let digits = body.trim_start_matches(|c: char| c.is_ascii_digit());
+            let list = matches!(it.next(), Some('-' | '•' | '*' | '◦')) && it.next() == Some(' ')
+                || digits.len() < body.len() && digits.starts_with(['.', ')']) && digits[1..].starts_with(' ');
+            if boundary || bullet || list { flush(&mut unit, &mut text, &mut out); }
+            if boundary { continue; }
+            unit.push(r);
+            text.push(' ');
+            // the list marker is not the item's first word
+            text.push_str(if list { digits.trim_start_matches(['-', '•', '*', '◦', '.', ')', ' ']) } else { body });
+        }
+        flush(&mut unit, &mut text, &mut out);
+        out
     }
 
     /// Emit repaint escapes for dirty rows. Returns bytes to append to stdout.
@@ -1498,10 +1950,13 @@ impl Screen {
         let (mut text, mut cell_of, mut code) = (String::new(), Vec::new(), Vec::new());
         let mut desired: Vec<u8> = Vec::new();
         let mut wrote = false;
-        if !self.dirty.contains(&true) { return; }
+        if !self.relabel && !self.dirty.contains(&true) { return; }
+        self.relabel = false;
         // a block's opening row can change after the rows below it are
         // drawn, so those rows repaint too, clean or not
         let blocks = self.block_rows(bottom().is_some());
+        let marks = if self.marks_on { self.mark_rows(&blocks) } else { vec![ROW_OTHER; self.rows] };
+        let dim = dim_fg().is_some();
         // unchanged cells between two runs cost less to rewrite than a
         // cursor move plus a fresh SGR, so short gaps join the run
         const GAP: usize = 3;
@@ -1509,9 +1964,13 @@ impl Screen {
             // body rows mix label, token and text codes, so only never-painted cells count there
             let late = block != 0 && self.grid[r].iter()
                 .any(|c| c.ch != ' ' && if block == BOTTOM_TEXT { c.shown == 0 } else { c.shown != block });
+            // a paragraph's label can arrive, or change, after its rows are drawn
+            let late = late || self.cols > 0 && (marks[r] == ROW_MARK) != (self.grid[r][0].shown == MARK);
+            let late = late || dim && block == 0 && self.grid[r].iter()
+                .any(|c| c.ch != ' ' && (c.shown == DIM) != (marks[r] == ROW_PROSE));
             if !self.dirty[r] && !late { continue; }
             self.dirty[r] = false;
-            self.desired_row(r, block, &mut desired, &mut text, &mut cell_of, &mut code);
+            self.desired_row(r, block, marks[r], &mut desired, &mut text, &mut cell_of, &mut code);
             let stale = |c: usize, row: &[Cell]| desired[c] != row[c].shown || row[c].cont;
             let mut c = 0;
             while c < self.cols {
@@ -1530,7 +1989,7 @@ impl Screen {
                             seg.push_str(&cell.attr.paint(desired[c]));
                             last_attr = Some((cell.attr.clone(), desired[c]));
                         }
-                        seg.push(cell.ch);
+                        seg.push(if desired[c] == MARK && cell.ch == ' ' { MARK_GLYPH } else { cell.ch });
                         if let Some(z) = &cell.zw { seg.push_str(z); }
                     }
                     self.grid[r][c].shown = desired[c];
@@ -1558,8 +2017,9 @@ impl Screen {
         let mut desired: Vec<u8> = Vec::new();
         let last_row = (0..self.rows).rev().find(|&r| self.grid[r].iter().any(|c| c.ch != ' ')).map_or(0, |r| r + 1);
         let blocks = self.block_rows(bottom().is_some());
+        let marks = if self.marks_on { self.mark_rows(&blocks) } else { vec![ROW_OTHER; self.rows] };
         for (r, &block) in blocks.iter().enumerate().take(last_row) {
-            self.desired_row(r, block, &mut desired, &mut text, &mut cell_of, &mut code);
+            self.desired_row(r, block, marks[r], &mut desired, &mut text, &mut cell_of, &mut code);
             let end = self.grid[r].iter().rposition(|c| c.ch != ' ').map_or(0, |i| i + 1);
             let mut last: Option<(Rc<Attr>, u8)> = None;
             for c in 0..end {
@@ -1570,7 +2030,7 @@ impl Screen {
                     s.push_str(&cell.attr.paint(desired[c]));
                     last = Some((cell.attr.clone(), desired[c]));
                 }
-                s.push(cell.ch);
+                s.push(if desired[c] == MARK && cell.ch == ' ' { MARK_GLYPH } else { cell.ch });
                 if let Some(z) = &cell.zw { s.push_str(z); }
             }
             s.push_str("\x1b[0m\n");
@@ -1581,6 +2041,155 @@ impl Screen {
     #[cfg(test)]
     fn row_string(&self, r: usize) -> String {
         self.grid[r].iter().filter(|c| !c.cont).map(|c| c.ch).collect::<String>().trim_end().to_string()
+    }
+}
+
+// ---- the MessageDisplay hook and its socket --------------------------------
+
+/// most bytes taken from one hook payload; a batch of lines is far smaller
+const HOOK_MAX: usize = 1 << 20;
+
+/// `claude-hl --hook`: Claude Code runs this with a hook payload on stdin.
+/// Relay it to the wrapper's socket and print nothing, so the text is drawn
+/// as it was. Never fail: a hook error must not touch Claude's output.
+fn hook_main() {
+    let Ok(path) = std::env::var("CLAUDE_HL_SOCK") else { return };
+    let mut payload = Vec::new();
+    let _ = std::io::stdin().lock().take(HOOK_MAX as u64).read_to_end(&mut payload);
+    if let Some(fd) = unix_socket(&path, false) {
+        write_all(fd, &payload);
+        unsafe { libc::close(fd); }
+    }
+}
+
+/// A Unix stream socket at `path`: listening when `serve`, else connected.
+fn unix_socket(path: &str, serve: bool) -> Option<libc::c_int> {
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = path.as_bytes();
+    if bytes.len() >= addr.sun_path.len() { return None; }
+    for (dst, &b) in addr.sun_path.iter_mut().zip(bytes) { *dst = b as libc::c_char; }
+    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 { return None; }
+    let sa = &addr as *const _ as *const libc::sockaddr;
+    let ok = unsafe {
+        if serve { libc::bind(fd, sa, len) == 0 && libc::listen(fd, 16) == 0 } else { libc::connect(fd, sa, len) == 0 }
+    };
+    if !ok { unsafe { libc::close(fd); } return None; }
+    Some(fd)
+}
+
+/// A fresh private directory from `template` (`...XXXXXX`).
+fn mkdtemp(template: &str) -> Option<String> {
+    let mut buf = CString::new(template).ok()?.into_bytes_with_nul();
+    let p = unsafe { libc::mkdtemp(buf.as_mut_ptr() as *mut libc::c_char) };
+    if p.is_null() { return None; }
+    buf.pop();
+    String::from_utf8(buf).ok()
+}
+
+/// Hook settings for the plugin: both events run `exe --hook`, quoted for sh
+/// and then for JSON.
+fn hooks_json(exe: &str) -> String {
+    let cmd = format!("'{}' --hook", exe.replace('\'', "'\\''"));
+    let cmd = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    let one = format!(r#"[{{"hooks":[{{"type":"command","command":"{cmd}","timeout":5}}]}}]"#);
+    format!("{{\"hooks\":{{\"MessageDisplay\":{one},\"UserPromptSubmit\":{one}}}}}\n")
+}
+
+/// Claude subcommands, which take no `--plugin-dir`.
+const CLAUDE_SUBCOMMANDS: &[&str] = &[
+    "agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin",
+    "plugins", "project", "respawn", "rm", "setup-token", "stop", "kill", "ultrareview", "update", "upgrade",
+];
+
+/// Whether `argv` starts an interactive Claude session the hook can join.
+fn hookable(argv: &[String]) -> bool {
+    let cmd = argv[0].rsplit('/').next().unwrap_or("");
+    cmd == "claude" && !argv.iter().skip(1).any(|a| CLAUDE_SUBCOMMANDS.contains(&a.as_str()))
+}
+
+/// The session-only plugin whose hooks feed Claude's text back, and the
+/// socket they write to, in a private temp dir for the session.
+struct Hooks { dir: String, listen: libc::c_int, conns: Vec<(libc::c_int, Vec<u8>)> }
+
+impl Hooks {
+    /// Set up the socket and the plugin; `None` when anything fails, in
+    /// which case Claude runs as usual and nothing is marked.
+    fn start() -> Option<Hooks> {
+        let exe = std::env::current_exe().ok()?;
+        let exe = exe.to_str()?;
+        let tmp = std::env::var("TMPDIR").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "/tmp".into());
+        let dir = mkdtemp(&format!("{}/claude-hl.XXXXXX", tmp.trim_end_matches('/')))?;
+        let sock = format!("{dir}/sock");
+        let hooks = (|| {
+            let listen = unix_socket(&sock, true)?;
+            let plugin = format!("{dir}/plugin");
+            std::fs::create_dir_all(format!("{plugin}/.claude-plugin")).ok()?;
+            std::fs::create_dir_all(format!("{plugin}/hooks")).ok()?;
+            std::fs::write(format!("{plugin}/.claude-plugin/plugin.json"),
+                "{\"name\":\"claude-hl\",\"description\":\"claude-hl's MessageDisplay hook\"}\n").ok()?;
+            std::fs::write(format!("{plugin}/hooks/hooks.json"), hooks_json(exe)).ok()?;
+            Some(Hooks { dir: dir.clone(), listen, conns: Vec::new() })
+        })();
+        match &hooks {
+            // the child inherits this, and so do the hooks Claude Code runs
+            Some(_) => std::env::set_var("CLAUDE_HL_SOCK", &sock),
+            None => { let _ = std::fs::remove_dir_all(&dir); }
+        }
+        hooks
+    }
+
+    fn plugin_dir(&self) -> String { format!("{}/plugin", self.dir) }
+
+    /// poll entries for the socket and every open connection
+    fn pollfds(&self, fds: &mut Vec<libc::pollfd>) {
+        fds.push(libc::pollfd { fd: self.listen, events: libc::POLLIN, revents: 0 });
+        for &(fd, _) in &self.conns { fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 }); }
+    }
+
+    /// Accept and read; each complete payload goes to `labels`. Returns
+    /// whether any did.
+    fn service(&mut self, fds: &[libc::pollfd], labels: &mut Labels) -> bool {
+        let any = libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+        if fds.first().is_some_and(|p| p.revents & any != 0) {
+            let fd = unsafe { libc::accept(self.listen, std::ptr::null_mut(), std::ptr::null_mut()) };
+            if fd >= 0 && self.conns.len() < 32 {
+                unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK); }
+                self.conns.push((fd, Vec::new()));
+            } else if fd >= 0 {
+                unsafe { libc::close(fd); }
+            }
+        }
+        let mut got = false;
+        let mut buf = [0u8; 16384];
+        let ready: Vec<bool> = (0..self.conns.len()).map(|i| fds.get(i + 1).is_some_and(|p| p.revents & any != 0)).collect();
+        for i in (0..self.conns.len()).rev() {
+            if !ready[i] { continue; }
+            let (fd, data) = &mut self.conns[i];
+            let n = unsafe { libc::read(*fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if n > 0 {
+                data.extend_from_slice(&buf[..n as usize]);
+                if data.len() <= HOOK_MAX { continue; }
+            } else if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+                continue;
+            } else if n == 0 {
+                if let Some(m) = parse_hook(data) { labels.ingest(&m); got = true; }
+            }
+            unsafe { libc::close(*fd); }
+            self.conns.remove(i);
+        }
+        got
+    }
+}
+
+impl Drop for Hooks {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.listen); }
+        for &(fd, _) in &self.conns { unsafe { libc::close(fd); } }
+        // only ever the directory mkdtemp() made for this session
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -1740,6 +2349,10 @@ fn run(argv: &[String]) -> i32 {
         }
     }
 
+    // the hook needs a terminal to paint on and a claude to join
+    let mut hooks = if screen.enabled && screen.marks_on && hookable(argv) { Hooks::start() } else { None };
+    let mut argv = argv.to_vec();
+    if let Some(h) = &hooks { argv.splice(1..1, ["--plugin-dir".to_string(), h.plugin_dir()]); }
     let cargs: Vec<CString> = argv.iter().map(|a| CString::new(a.as_str()).unwrap()).collect();
     let mut master: libc::c_int = 0;
     let mut wsz = ws.unwrap_or(libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 });
@@ -1802,14 +2415,25 @@ fn run(argv: &[String]) -> i32 {
                 screen.resize(w.ws_row.max(1) as usize, w.ws_col.max(1) as usize);
             }
         }
-        let mut fds = [
+        let mut fds = vec![
             libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: if watch_stdin { stdin } else { -1 }, events: libc::POLLIN, revents: 0 },
         ];
-        let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if let Some(h) = &hooks { h.pollfds(&mut fds); }
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
         if r < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
             break;
+        }
+        // labels first: the hook returns before Claude draws the lines, so
+        // a payload ready alongside output belongs to that output
+        if let Some(h) = hooks.as_mut() {
+            if h.service(&fds[2..], &mut screen.labels) {
+                screen.relabel = true;
+                out.clear();
+                screen.repaint(&mut out);
+                if !out.is_empty() && !write_all(stdout, &out) { break; }
+            }
         }
         if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
             let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut _, buf.len()) };
@@ -1889,7 +2513,30 @@ Use \x1b[38;2;95;179;217mclaude --rc \"my-project\"\x1b[39m from the project dir
 Tagged. \x1b[38;2;177;185;249mv1.2.0\x1b[39m is on \x1b[38;2;177;185;249mmain\x1b[39m; push with \x1b[38;2;177;185;249mgit push --follow-tags\x1b[39m when ready.\r\n\
 Let me make sure the build passes, then go ahead with the next step; run \x1b[38;2;177;185;249mnpm test\x1b[39m after.\r\n\
 Plain prose with the word node in it, and cd ~/Documents/codes/packages.\r\n\
-\x1b[1m● streamed:\x1b[22m Ran git\x1b[0m";
+⏺ Cargo builds happen in stages, and the linker step is where this one failed.\r\n\
+\r\n\
+\x20 You need to run xcode-select --install yourself, then cargo clean && cargo build.\r\n\
+\x20 Without the CLT update the link keeps failing.\r\n\
+\r\n\
+\x20 Historically Apple has renamed several libSystem symbols across SDK versions.\r\n\
+\r\n\
+\x20 - I did not verify this on Linux.\r\n\
+\x20 - The theme list is unchanged.\r\n\
+\r\n\
+\x20 Do you want the marker on by default?\r\n\
+\x1b[1m● streamed:\x1b[22m Ran git\r\n\
+╭──────────────╮\r\n\
+│ > ask me     │\r\n\
+╰──────────────╯\x1b[0m";
+
+/// What the MessageDisplay hook hands over for the reply in `SAMPLE`.
+const SAMPLE_MD: &str = "Cargo builds happen in stages, and the linker step is where this one failed.\n\n\
+You need to run `xcode-select --install` yourself, then `cargo clean && cargo build`.\n\
+Without the CLT update the link keeps failing.\n\n\
+Historically Apple has renamed several libSystem symbols across SDK versions.\n\n\
+- I did not verify this on Linux.\n\
+- The theme list is unchanged.\n\n\
+Do you want the marker on by default?\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1907,8 +2554,13 @@ fn main() {
         }
         return;
     }
+    if args.first().map(String::as_str) == Some("--hook") {
+        hook_main();
+        return;
+    }
     if args.first().map(String::as_str) == Some("--selftest") {
         let mut sc = Screen::new(40, 200);
+        sc.labels.ingest(&HookMsg { event: "MessageDisplay".into(), delta: SAMPLE_MD.into(), ..Default::default() });
         sc.feed(SAMPLE.as_bytes());
         // simulate Claude Code appending to an already-drawn line in pieces
         for piece in [" sta", "tus --sho", "rt && git diff"] { sc.feed(piece.as_bytes()); }
@@ -2128,7 +2780,7 @@ mod tests {
     fn remapped_foreground_is_wanted_even_in_prose() {
         let mut sc = screen(1, 20, "\x1b[38;2;177;185;249mfoo\x1b[39m bar");
         let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
-        sc.desired_row(0, 0, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(0, 0, ROW_OTHER, &mut d, &mut t, &mut c, &mut k);
         assert_eq!(d[0], REMAP_BASE);
         assert_eq!(d[4], 0);
         assert_eq!(k[0..3], [CTX_CODE, CTX_CODE, CTX_CODE]);
@@ -2177,7 +2829,7 @@ mod tests {
         assert_eq!(parse_bottom("head=zz,bogus=112233"), Bottom::default());
         let mut sc = screen(3, 40, "\r\n⏺ Bottom line\r\n  - Fix: run \x1b[38;2;177;185;249mnpm\x1b[39m now");
         let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
-        sc.desired_row(2, BOTTOM_TEXT, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(2, BOTTOM_TEXT, ROW_OTHER, &mut d, &mut t, &mut c, &mut k);
         assert_eq!(d[4..8], [BOTTOM_FIX; 4], "the label: {d:?}");
         assert_eq!((d[0], d[2], d[17]), (BOTTOM_TEXT, BOTTOM_TEXT, BOTTOM_TEXT), "plain text: {d:?}");
         assert!(d[13] != 0 && d[13] != BOTTOM_TEXT, "inline code keeps its colour: {d:?}");
@@ -2233,7 +2885,7 @@ mod tests {
         let (mut out, mut d, mut t, mut c, mut k) = (Vec::new(), Vec::new(), String::new(), Vec::new(), Vec::new());
         sc.repaint(&mut out);
         assert!(out.is_empty(), "painted once");
-        sc.desired_row(2, PRIVATE, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(2, PRIVATE, ROW_OTHER, &mut d, &mut t, &mut c, &mut k);
         assert_eq!((d[0], d[11], d[12]), (PRIVATE, PRIVATE, 0));
     }
 
@@ -2302,5 +2954,230 @@ mod tests {
         assert_eq!(a.render("38;2;1;2;3"), "\x1b[0;1;48;5;7;38;2;1;2;3m");
         a.apply(&[]);
         assert_eq!(a, Attr::default());
+    }
+
+    #[test]
+    fn attention_is_a_question_an_instruction_or_a_flagged_phrase() {
+        for yes in [
+            "Do you want the marker on by default?",
+            "You need to run xcode-select --install yourself.",
+            "Run cargo clean && cargo build after that.",
+            "Note: a custom linker in .cargo/config.toml shadows this.",
+            "I did not verify this on Linux.",
+            "Without the CLT update the link keeps failing.",
+            "This is destructive; back up first.",
+            "Your call: keep the old theme or drop it.",
+            "Restart the server when it finishes.",
+            "It’s up to you whether to keep it.",
+        ] { assert!(needs_attention(yes), "{yes:?}"); }
+        for no in [
+            "Cargo builds happen in stages, and the linker step is where this one failed to link before.",
+            "Historically Apple has renamed several libSystem symbols across SDK versions.",
+            "The theme list is unchanged.",
+            "Ran the suite again and it passed.",
+            "Let me make sure the build passes, then go ahead with the next step.",
+            "The build log is in target/release/build.log.",
+        ] { assert!(!needs_attention(no), "{no:?}"); }
+        assert!(!needs_attention("Runs on every chunk."), "opener must be a whole word");
+    }
+
+    #[test]
+    fn json_reader_reads_hook_payloads_and_rejects_junk() {
+        let payload = br#"{"session_id":"abc","cwd":"/x","hook_event_name":"MessageDisplay","turn_id":"t","message_id":"m1","index":2,"final":false,"delta":"Line \"one\"\n\tcaf\u00e9 \ud83d\ude00 back\\slash\n","nested":{"a":[1,2,{"b":null}],"c":"d"},"n":-1.5e3,"ok":true}"#;
+        let m = parse_hook(payload).unwrap();
+        assert_eq!(m.event, "MessageDisplay");
+        assert_eq!(m.message_id, "m1");
+        assert_eq!(m.delta, "Line \"one\"\n\tcafé 😀 back\\slash\n");
+        assert_eq!(m.prompt, "");
+        let f = json_fields(payload).unwrap();
+        assert_eq!(f.get("ok"), Some(&Json::Bool(true)));
+        assert_eq!(f.get("nested"), Some(&Json::Other));
+        // every prefix of a valid payload parses or fails, never panics
+        for n in 0..payload.len() { let _ = parse_hook(&payload[..n]); }
+        for bad in [&b"[1,2]"[..], b"{\"a\":}", b"{\"a\" 1}", b"{\"a\":\"\\q\"}", b"{\"a\":\"\\ud83d\"}", b"", b"nope",
+                    b"{\"a\":tru}", b"{\"a\":\"x\",}", b"{\"a\":[1,]}"] {
+            assert!(json_fields(bad).is_none(), "{:?}", String::from_utf8_lossy(bad));
+        }
+        let deep = format!("{{\"a\":{}1{}}}", "[".repeat(100), "]".repeat(100));
+        assert!(json_fields(deep.as_bytes()).is_none(), "nesting is capped");
+        assert!(json_fields(b" { } ").unwrap().is_empty());
+    }
+
+    const REDDIT_MD: &str = "Here's a draft. Copy the title and body as-is, or tweak the subreddit-specific bits.\n\n\
+**Title:** I added one tool to chrome-devtools-mcp so my agent stops spending a turn on every click\n\n\
+**Body:**\n\n\
+With chrome-devtools-mcp, every click is a full model turn. Dismiss the banner, log in, open Settings. That's three turns and three snapshots before it even looks at the bug.\n\n\
+jev-reach is chrome-devtools-mcp plus one tool, `reach`. Give it a one-sentence goal.\n\n\
+```\n/plugin marketplace add rashedInt32/jev-reach\n/plugin install jev-reach@jev-reach\n```\n\n\
+Needs a TypeSafe API key. Page text goes to TypeSafe each step, so don't point it at client sites without thinking.\n\n\
+https://github.com/rashedInt32/jev-reach\n";
+
+    #[test]
+    fn classify_keeps_a_drafted_post_whole_and_marks_real_asks() {
+        let got = classify(REDDIT_MD, false, Mode::default());
+        let labels: Vec<u8> = got.iter().map(|p| p.label).collect();
+        let (o, p, k) = (ROW_OTHER, ROW_PROSE, ROW_KEEP);
+        // framing, Title, Body, three body paragraphs, the fence, the warning, the link
+        assert_eq!(labels, [p, k, k, k, k, o, k, k], "{got:?}");
+        assert!(got[5].text.starts_with("/plugin marketplace"), "the fence is one unit: {:?}", got[5].text);
+        assert_eq!(got[5].at, REDDIT_MD.find("```").unwrap(), "a code paragraph starts at its fence");
+        assert_eq!(got[6].mode, Mode { fence: false, keep: true }, "and the mode at each start is kept");
+        // the prompt asked for writing: the framing line is part of the reply too
+        let labels: Vec<u8> = classify(REDDIT_MD, true, Mode::default()).iter().map(|p| p.label).collect();
+        assert_eq!(labels, [k, k, k, k, k, o, k, k]);
+        let post = "Title: Tea\n\nBody:\n\nToo jittery? Green tea. You need less caffeine.\n";
+        assert!(classify(post, true, Mode::default()).iter().all(|p| p.label == k), "a question in the post asks nothing");
+        // an ordinary reply: asks are marked, narration is prose, structure is left alone
+        let md = "## What happened\n\nCargo builds happen in stages.\n\nYou need to run `xcode-select --install` yourself.\n\n\
+- I did not verify this on Linux.\n- The theme list is unchanged.\n\n**Files changed:** two.\n\nDo you want the marker on?\n";
+        let got = classify(md, false, Mode::default());
+        let labels: Vec<u8> = got.iter().map(|p| p.label).collect();
+        assert_eq!(labels, [o, p, ROW_MARK, ROW_MARK, p, p, ROW_MARK], "{got:?}");
+        assert_eq!(got.len(), 7, "list items are their own paragraphs");
+        // an unclosed fence is code so far, and a split resumes from before it
+        let got = classify("Text.\n\n```\nlet x = 1;\n", false, Mode::default());
+        assert_eq!((got[1].label, got[1].at, got[1].mode.fence), (o, 7, false));
+    }
+
+    #[test]
+    fn write_intent_looks_at_the_verb_near_the_front() {
+        assert!(write_intent("write me a reddit post about jev-reach"));
+        assert!(write_intent("Can you draft an email to the team?"));
+        assert!(write_intent("please rewrite this paragraph"));
+        assert!(!write_intent("fix the bug in the parser and write a test"), "later verbs do not count");
+        assert!(!write_intent("why does the build fail?"));
+        assert_eq!(bold_label("**Body:**"), Some("body".into()));
+        assert_eq!(bold_label("**Title:** I added"), Some("title".into()));
+        assert_eq!(bold_label("**Bottom line**"), None);
+        assert_eq!(bold_label("**Why it is better.** Today"), None);
+    }
+
+    #[test]
+    fn para_key_matches_markdown_to_screen_rows() {
+        assert_eq!(para_key("**Title:** I added one tool to `chrome-devtools-mcp` so my agent"),
+                   para_key("Title: I added one tool to chrome-devtools-mcp so my agent stops"));
+        assert_eq!(para_key("- I did not verify this on Linux.\n"), para_key(" I did not verify this on Linux."));
+        assert_eq!(para_key("Wrapped across\ntwo lines"), para_key("Wrapped across two   lines"));
+        assert_eq!(para_key("Ab-1 ☕ ok!"), "ab1ok");
+        assert_ne!(para_key("Body:"), para_key("Title:"));
+    }
+
+    #[test]
+    fn labels_follow_the_message_and_the_prompt() {
+        let mut l = Labels::default();
+        let md = |id: &str, delta: &str| HookMsg { event: "MessageDisplay".into(), message_id: id.into(), delta: delta.into(), prompt: String::new() };
+        l.ingest(&md("m1", "Cargo builds happen in stages.\n\n"));
+        l.ingest(&md("m1", "You need to run it yourself.\n"));
+        assert_eq!(l.get("Cargo builds happen in stages."), ROW_PROSE);
+        assert_eq!(l.get("  You need to run it yourself."), ROW_MARK);
+        assert_eq!(l.get("Never seen"), ROW_OTHER);
+        // a second message starts fresh, but earlier labels stay for rows still on screen
+        l.ingest(&HookMsg { event: "UserPromptSubmit".into(), prompt: "write me a post".into(), ..Default::default() });
+        assert!(l.writing);
+        l.ingest(&md("m2", "Plain narration only.\n\n"));
+        assert_eq!(l.get("Plain narration only."), ROW_KEEP);
+        assert_eq!(l.get("Cargo builds happen in stages."), ROW_PROSE);
+        assert_eq!(l.msg, "Plain narration only.\n\n");
+        // a delta that ends mid-paragraph is relabelled from that paragraph's start
+        l.ingest(&HookMsg { event: "UserPromptSubmit".into(), prompt: "why did it fail?".into(), ..Default::default() });
+        assert!(!l.writing);
+        l.ingest(&md("m3", "Plain narration only.\n\n"));
+        l.ingest(&md("m3", "Now you need\n"));
+        l.ingest(&md("m3", "to restart.\n"));
+        assert_eq!(l.get("Now you need to restart."), ROW_MARK);
+        assert_eq!(l.done, "Plain narration only.\n\n".len(), "{}", l.done);
+        l.ingest(&HookMsg { event: "Stop".into(), ..Default::default() });
+        // the store is bounded
+        for i in 0..Labels::CAP + 10 { l.ingest(&md("m4", &format!("Paragraph number {i} here.\n\n"))); }
+        assert!(l.map.len() <= Labels::CAP);
+        assert_eq!(l.get("Paragraph number 0 here."), ROW_OTHER, "the oldest key is gone");
+    }
+
+    #[test]
+    fn hooks_json_quotes_the_exe_for_sh_and_json() {
+        let j = hooks_json("/Users/o'brien/my \"bin\"/claude-hl");
+        assert!(j.contains(r#""command":"'/Users/o'\\''brien/my \"bin\"/claude-hl' --hook""#), "{j}");
+        let f = json_fields(j.as_bytes()).expect("well-formed");
+        assert_eq!(f.get("hooks"), Some(&Json::Other));
+        assert_eq!(j.matches("--hook").count(), 2, "both events");
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(hookable(&s(&["claude"])));
+        assert!(hookable(&s(&["/opt/bin/claude", "--model", "haiku", "start here"])));
+        assert!(!hookable(&s(&["claude", "mcp", "list"])));
+        assert!(!hookable(&s(&["codex"])));
+    }
+
+    #[test]
+    fn marks_follow_labelled_paragraphs_of_prose_only() {
+        let mut sc = screen(14, 60, "⏺ Done. You need to restart\r\n  the server now.\r\n\r\n  Plain narration here,\r\n  nothing to do.\r\n⏺ Bash(you must not run this)\r\n\x1b[38;2;153;153;153m  ⎿  you must see this output\x1b[39m\r\n  - Run cargo build\r\n  - the theme list is unchanged\r\n\r\n⏺ Privately, you must\r\n\r\n│ > you need ?  │\r\n  Is that ok?");
+        sc.labels.ingest(&HookMsg { event: "MessageDisplay".into(), message_id: "m".into(), prompt: String::new(),
+            delta: "Done. You need to restart the server now.\n\nPlain narration here, nothing to do.\n\n- Run cargo build\n- the theme list is unchanged\n".into() });
+        let blocks = sc.block_rows(false);
+        let m = sc.mark_rows(&blocks);
+        let (o, p, k) = (ROW_OTHER, ROW_PROSE, ROW_MARK);
+        let want = [k, k, o, p, p, o, o, k, p, o, o, o, o, o]; // the box row makes the tail input area
+        assert_eq!(m, want, "{m:?}");
+        // a paragraph the hook never saw is left as drawn, whatever it says
+        let sc = screen(2, 40, "  You must run this\r\n  right now.");
+        assert_eq!(sc.mark_rows(&[0, 0]), [ROW_OTHER, ROW_OTHER]);
+    }
+
+    #[test]
+    fn mark_paints_column_zero_and_arrives_late_if_it_must() {
+        let mut sc = screen(4, 40, "⏺ You must restart\r\n  the server.\r\n\r\n  Nothing else.");
+        sc.marks_on = true;
+        let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
+        sc.desired_row(1, 0, ROW_MARK, &mut d, &mut t, &mut c, &mut k);
+        assert_eq!((d[0], d[1], d[2]), (MARK, 0, 0));
+        // rows drawn before their label: nothing marked yet
+        let mut out = Vec::new();
+        sc.repaint(&mut out);
+        assert!(!String::from_utf8_lossy(&out).contains(MARK_GLYPH));
+        out.clear();
+        sc.repaint(&mut out);
+        assert!(out.is_empty(), "clean rows stay quiet");
+        // the label lands: relabel repaints the marked rows only
+        sc.labels.ingest(&HookMsg { event: "MessageDisplay".into(), message_id: "m".into(), prompt: String::new(),
+            delta: "You must restart the server.\n\nNothing else.\n".into() });
+        sc.relabel = true;
+        sc.repaint(&mut out);
+        let s = String::from_utf8(out.clone()).unwrap();
+        assert_eq!(s.matches(MARK_GLYPH).count(), 1, "{s:?}");
+        assert!(s.contains("\x1b[2;1H"), "the second row gets the glyph: {s:?}");
+        let rows: Vec<String> = sc.render_inline().lines().map(String::from).collect();
+        assert!(rows[0].contains('⏺') && !rows[0].contains(MARK_GLYPH), "bullet is recoloured, not replaced: {:?}", rows[0]);
+        assert!(rows[1].contains(MARK_GLYPH), "{:?}", rows[1]);
+        assert!(!rows[3].contains(MARK_GLYPH), "{:?}", rows[3]);
+        // the paragraph loses its mark when its rows part: the glyph is erased
+        sc.feed(b"\x1b[2;1H\x1b[2K  the server.");
+        sc.feed(b"\x1b[1;1H\x1b[2K\xe2\x8f\xba Fine.");
+        out.clear();
+        sc.repaint(&mut out);
+        let third = String::from_utf8(out).unwrap();
+        assert!(!third.contains(MARK_GLYPH), "{third:?}");
+    }
+
+    #[test]
+    fn mark_pass_costs_microseconds() {
+        let mut body = String::new();
+        let mut md = String::new();
+        for i in 0..40 {
+            body.push_str(if i % 5 == 0 { "\r\n" } else if i % 5 == 1 { "⏺ You need to check this row, then run the build again and tell me what you see.\r\n" }
+                          else { "  Historically Apple has renamed several libSystem symbols across SDK versions here.\r\n" });
+            md.push_str(&format!("Paragraph {i} of filler to make the label store realistic.\n\n"));
+        }
+        md.push_str("You need to check this row, then run the build again and tell me what you see.\n\nHistorically Apple has renamed several libSystem symbols across SDK versions here.\n");
+        let mut sc = screen(40, 100, &body);
+        let t = std::time::Instant::now();
+        sc.labels.ingest(&HookMsg { event: "MessageDisplay".into(), message_id: "m".into(), delta: md, prompt: String::new() });
+        let ingest = t.elapsed();
+        eprintln!("ingest of a 42-paragraph message: {ingest:?}");
+        assert!(ingest < std::time::Duration::from_millis(5), "{ingest:?}");
+        let t = std::time::Instant::now();
+        let n = 1000;
+        for _ in 0..n { let b = sc.block_rows(true); std::hint::black_box(sc.mark_rows(&b)); }
+        let per = t.elapsed() / n;
+        eprintln!("mark pass over a 40x100 screen: {per:?}");
+        assert!(per < std::time::Duration::from_millis(2), "{per:?}");
     }
 }
