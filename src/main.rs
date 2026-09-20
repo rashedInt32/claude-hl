@@ -10,10 +10,6 @@
 //!   CLAUDE_HL_PRIVATE=435872 claude-hl   # colour for Claude's private notes (default: half the text colour)
 //!   CLAUDE_HL_BOTTOM_LINE=head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb claude-hl
 //!                                        # colours for a "Bottom line" summary block (default: off)
-//!   CLAUDE_HL_MARK=1 claude-hl           # gutter mark beside paragraphs that ask something of you
-//!                                        # (1 for the theme's warn colour, or rrggbb; default: off)
-//!   CLAUDE_HL_DIM=1 claude-hl            # the other prose paragraphs at half brightness
-//!                                        # (1 for half of each colour, or rrggbb; default: off)
 //!   CLAUDE_HL_FG=94a4b6 claude-hl        # terminal text colour, for half-bright private notes (tmux)
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   claude-hl --selftest                 # print sample highlighted text
@@ -26,6 +22,7 @@
 //! whose colour should differ from what is on screen are repainted with
 //! absolute cursor moves; the cursor and attributes are then restored.
 //! This survives renderers that stream a line in pieces (Claude Code does).
+//! Width is never changed, so the TUI layout survives.
 
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -120,16 +117,6 @@ const BOTTOM_TEXT: u8 = 253;
 const BOTTOM_VERIFIED: u8 = 252;
 const BOTTOM_ISSUE: u8 = 251;
 const BOTTOM_FIX: u8 = 250;
-/// column 0 of a paragraph that needs the reader: a `▎` in the mark colour,
-/// or the `⏺` bullet recoloured when it sits there
-const MARK: u8 = 249;
-const MARK_GLYPH: char = '▎';
-/// a prose paragraph nothing is asked about, at half brightness (`CLAUDE_HL_DIM`)
-const DIM: u8 = 248;
-/// what `mark_rows()` says about a row
-const ROW_OTHER: u8 = 0;
-const ROW_PROSE: u8 = 1;
-const ROW_MARK: u8 = 2;
 /// the words a `Bottom line` row may open with, and the code each one paints
 const BOTTOM_LABELS: [(&str, u8); 3] = [("Verified:", BOTTOM_VERIFIED), ("Issue:", BOTTOM_ISSUE), ("Fix:", BOTTOM_FIX)];
 
@@ -157,89 +144,6 @@ fn env_fg(var: &str) -> Option<String> {
 fn private_fg() -> Option<&'static str> {
     static P: OnceLock<Option<String>> = OnceLock::new();
     P.get_or_init(|| env_fg("CLAUDE_HL_PRIVATE")).as_deref()
-}
-
-/// `CLAUDE_HL_MARK`: SGR params for the gutter mark. `rrggbb` picks the
-/// colour; any other non-empty value uses the theme's warn colour. Unset or
-/// empty turns marks off.
-fn mark_sgr() -> Option<&'static str> {
-    static M: OnceLock<Option<String>> = OnceLock::new();
-    M.get_or_init(|| {
-        let v = std::env::var("CLAUDE_HL_MARK").ok()?;
-        let h = v.trim().trim_start_matches('#');
-        if h.is_empty() { return None; }
-        Some(if valid_hex(h) { fg_params(h) } else { palette()[Color::Warn as usize].clone() })
-    }).as_deref()
-}
-
-/// `CLAUDE_HL_DIM`: draw prose paragraphs that `needs_attention()` does not
-/// pick at half brightness. `Some(None)` halves each cell's own colour;
-/// `Some(Some(params))` is a fixed `rrggbb`; `None` is off.
-fn dim_fg() -> Option<Option<&'static str>> {
-    static D: OnceLock<Option<Option<String>>> = OnceLock::new();
-    D.get_or_init(|| {
-        let v = std::env::var("CLAUDE_HL_DIM").ok()?;
-        let h = v.trim().trim_start_matches('#');
-        if h.is_empty() { return None; }
-        Some(valid_hex(h).then(|| fg_params(h)))
-    }).as_ref().map(Option::as_deref)
-}
-
-/// Phrases that make a paragraph one the reader must act on or decide about.
-/// Matched on whole words after lowercasing; a trailing `*` matches any
-/// continuation of the last word (`fail*` takes `fails`, `failed`, `failing`).
-const ATTENTION: &[&str] = &[
-    // asks of the reader
-    "you need", "you'll need", "you must", "you should", "you have to", "you may want", "you might want",
-    "you can't", "you cannot", "don't forget", "your call", "up to you", "let me know",
-    "do you want", "should i", "which one", "manually", "by hand", "before you", "if you want", "on your machine",
-    "your machine", "your terminal", "yourself", "restart", "reboot", "reinstall", "re-run", "rerun", "log in",
-    "sign in",
-    // what did not happen
-    "not verif*", "can't verify", "cannot verify", "could not verify", "couldn't verify", "unverified",
-    "untested", "not tested", "no tests", "i did not", "i didn't", "i haven't", "i could not", "i couldn't",
-    "skipped", "left out", "blocked", "not yet", "won't work", "will not work", "does not work", "doesn't work",
-    "still fail*", "keeps fail*", "regress*", "assum*",
-    // risk
-    "warning", "caution", "careful", "risk*", "danger*", "breaking", "irreversib*", "destructive", "data loss",
-    "backup", "security", "vulnerab*", "secret*", "credential*", "password*", "deprecat*", "caveat*", "however",
-    "important", "todo", "fixme",
-];
-
-/// Openers that make the paragraph an instruction to the reader.
-const IMPERATIVE: &[&str] = &[
-    "run", "set", "add", "install", "restart", "open", "check", "update", "remove", "delete", "replace",
-    "rename", "export", "copy", "paste", "change", "edit", "enable", "disable", "confirm", "review", "decide",
-    "choose", "pick", "try", "note", "beware", "remember", "don't", "do not", "never", "always", "please",
-    "make sure", "be sure",
-];
-
-/// Whether a paragraph of Claude's prose needs the reader: it asks a
-/// question, opens with an instruction, or carries an `ATTENTION` phrase.
-fn needs_attention(text: &str) -> bool {
-    // normalise to ` word word ? word ` so phrases match on word boundaries
-    let mut norm = String::with_capacity(text.len() + 2);
-    norm.push(' ');
-    let mut in_word = false;
-    for c in text.chars() {
-        // a hyphen joins `re-run`; on its own it is a list marker or a dash
-        let keep = c.is_alphanumeric() || matches!(c, '\'' | '’') || c == '-' && in_word;
-        if keep {
-            for l in c.to_lowercase() { norm.push(if l == '’' { '\'' } else { l }); }
-            in_word = true;
-        } else {
-            if in_word { norm.push(' '); }
-            in_word = false;
-            if c == '?' { norm.push_str("? "); }
-        }
-    }
-    if in_word { norm.push(' '); }
-    if norm.contains(" ? ") { return true; }
-    if IMPERATIVE.iter().any(|w| norm[1..].starts_with(w) && norm[1 + w.len()..].starts_with(' ')) { return true; }
-    ATTENTION.iter().any(|p| match p.strip_suffix('*') {
-        Some(stem) => norm.contains(&format!(" {stem}")),
-        None => norm.contains(&format!(" {p} ")),
-    })
 }
 
 /// Colours for the `Bottom line` block, as SGR params; an unset slot leaves
@@ -300,19 +204,14 @@ fn parse_bottom(spec: &str) -> Bottom {
 /// SGR params for a private-note cell whose own fg is `fg` (`rgb` once
 /// resolved): italic, in `fixed` when set, else at half its own colour.
 fn private_sgr(fixed: Option<&str>, fg: &str, rgb: Option<[u8; 3]>) -> String {
-    format!("3;{}", half_sgr(fixed, fg, rgb))
-}
-
-/// SGR params for a cell whose own fg is `fg` (`rgb` once resolved), in
-/// `fixed` when set, else at half its own colour.
-fn half_sgr(fixed: Option<&str>, fg: &str, rgb: Option<[u8; 3]>) -> String {
-    match (fixed, rgb) {
+    let colour = match (fixed, rgb) {
         (Some(p), _) => p.to_string(),
         (None, Some([r, g, b])) => format!("38;2;{};{};{}", r / 2, g / 2, b / 2),
         // colour unknown: the terminal's own faint is the best guess
         (None, None) if fg.is_empty() => "2".to_string(),
         (None, None) => format!("2;{fg}"),
-    }
+    };
+    format!("3;{colour}")
 }
 
 /// `[r, g, b]` of a truecolor fg such as `38;2;148;165;182`.
@@ -1062,14 +961,12 @@ impl Attr {
     fn paint(&self, code: u8) -> String {
         let bg = if self.fg == codespan_fg() { code_bg() } else { "" };
         match code {
-            PRIVATE | DIM => {
+            PRIVATE => {
                 let fg = remaps().iter().find(|(from, _)| *from == self.fg).map_or(self.fg.as_str(), |(_, to)| to);
                 let rgb = if fg.is_empty() { default_fg() } else { rgb_of(fg) };
-                if code == PRIVATE { self.render_bg(&private_sgr(private_fg(), fg, rgb), bg) }
-                else { self.render_bg(&half_sgr(dim_fg().flatten(), fg, rgb), bg) }
+                self.render_bg(&private_sgr(private_fg(), fg, rgb), bg)
             }
             BOTTOM_FIX..=BOTTOM_HEAD => self.render_bg(&bottom().map_or_else(String::new, |b| b.sgr(code)), bg),
-            MARK => self.render_bg(mark_sgr().unwrap_or(""), bg),
             _ => self.render_bg(code_sgr(code), bg),
         }
     }
@@ -1133,8 +1030,6 @@ struct Screen {
     autowrap: bool,
     alt: bool,
     enabled: bool,
-    /// prose paragraphs are classified (`CLAUDE_HL_MARK` or `CLAUDE_HL_DIM` set)
-    marks_on: bool,
     dirty: Vec<bool>,
     /// main-screen state parked while the app is on the alternate screen
     main_saved: Option<(Vec<Vec<Cell>>, Vec<bool>, usize, usize, usize, usize, bool)>,
@@ -1157,7 +1052,6 @@ impl Screen {
             saved: (0, 0, attr.clone()),
             top: 0, bottom: rows.saturating_sub(1),
             attr, pending_wrap: false, autowrap: true, alt: false, enabled: true,
-            marks_on: mark_sgr().is_some() || dim_fg().is_some(),
             dirty: vec![false; rows],
             main_saved: None,
             pst: PState::Ground, csi: Vec::new(), utf8: Vec::new(),
@@ -1558,7 +1452,7 @@ impl Screen {
     /// Colour code wanted for every cell of row `r`: remaps first, then the
     /// tokenizer's spans on top, then the row's `block` (see `block_rows()`)
     /// over both, then wide-char continuations follow their head.
-    fn desired_row(&mut self, r: usize, block: u8, prose: u8, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
+    fn desired_row(&mut self, r: usize, block: u8, desired: &mut Vec<u8>, text: &mut String, cell_of: &mut Vec<usize>, ctx: &mut Vec<u8>) {
         self.row_text(r, text, cell_of, ctx);
         self.spans_buf.clear();
         spans(text, ctx, &mut self.spans_buf);
@@ -1591,61 +1485,7 @@ impl Screen {
             }
             _ => for d in &mut desired[..end] { *d = block; },
         }
-        if prose == ROW_MARK && end > 0 { desired[0] = MARK; }
-        if prose == ROW_PROSE && dim_fg().is_some() { for d in &mut desired[..end] { *d = DIM; } }
         for c in 1..self.cols { if self.grid[r][c].cont { desired[c] = desired[c - 1]; } }
-    }
-
-    /// Per row: `ROW_MARK` when it belongs to a paragraph of Claude's prose
-    /// that `needs_attention()`, `ROW_PROSE` for any other prose row, else
-    /// `ROW_OTHER`. A paragraph runs from a `⏺`, a blank row or a list
-    /// marker to the next of those. Tool calls, their output, chrome, fully
-    /// coloured rows and rows already in a block end a paragraph and are
-    /// never prose.
-    fn mark_rows(&self, blocks: &[u8]) -> Vec<u8> {
-        let mut out = vec![ROW_OTHER; self.rows];
-        let (mut unit, mut text): (Vec<usize>, String) = (Vec::new(), String::new());
-        let flush = |unit: &mut Vec<usize>, text: &mut String, out: &mut Vec<u8>| {
-            let state = if needs_attention(text) { ROW_MARK } else { ROW_PROSE };
-            for &r in unit.iter() { out[r] = state; }
-            unit.clear(); text.clear();
-        };
-        let gray = secondary_fg();
-        let lead_of = |row: &Vec<Cell>| row.iter().filter(|c| !c.cont).map(|c| c.ch).collect::<String>();
-        // the input box is the last `>` row on screen; what you type wraps
-        // under it and looks like prose, so it and everything below stay out
-        let input = self.grid.iter().rposition(|row| {
-            let l = lead_of(row);
-            let l = l.trim_start().trim_start_matches(['│', '┃', ' ']);
-            l.starts_with(['>', '❯']) && !l.starts_with(">>")
-        }).unwrap_or(self.rows);
-        for (r, row) in self.grid.iter().enumerate() {
-            if r >= input { flush(&mut unit, &mut text, &mut out); break; }
-            let full = lead_of(row);
-            let lead = full.trim();
-            if lead.is_empty() { flush(&mut unit, &mut text, &mut out); continue; }
-            let bullet = lead.starts_with(['⏺', '●']);
-            let body = lead.trim_start_matches(['⏺', '●', ' ']);
-            let name = body.split('(').next().unwrap_or("");
-            let tool_call = bullet && !name.is_empty() && name.len() < body.len()
-                && name.chars().all(|c| c.is_alphanumeric() || c == '_');
-            let chrome = body.starts_with(['⎿', '╭', '│', '╰', '─', '┌', '└', '├', '✻', '✽', '✶', '·', '>']);
-            let coloured = row.iter().filter(|c| !c.cont && c.ch != ' ' && c.ch != '⏺').all(|c| !c.attr.fg.is_empty());
-            let boundary = blocks[r] != 0 || tool_call || chrome || coloured
-                || row.iter().any(|c| c.ch != ' ' && c.attr.fg == gray);
-            let mut it = body.chars();
-            let digits = body.trim_start_matches(|c: char| c.is_ascii_digit());
-            let list = matches!(it.next(), Some('-' | '•' | '*' | '◦')) && it.next() == Some(' ')
-                || digits.len() < body.len() && digits.starts_with(['.', ')']) && digits[1..].starts_with(' ');
-            if boundary || bullet || list { flush(&mut unit, &mut text, &mut out); }
-            if boundary { continue; }
-            unit.push(r);
-            text.push(' ');
-            // the list marker is not the item's first word
-            text.push_str(if list { digits.trim_start_matches(['-', '•', '*', '◦', '.', ')', ' ']) } else { body });
-        }
-        flush(&mut unit, &mut text, &mut out);
-        out
     }
 
     /// Emit repaint escapes for dirty rows. Returns bytes to append to stdout.
@@ -1662,8 +1502,6 @@ impl Screen {
         // a block's opening row can change after the rows below it are
         // drawn, so those rows repaint too, clean or not
         let blocks = self.block_rows(bottom().is_some());
-        let marks = if self.marks_on { self.mark_rows(&blocks) } else { vec![ROW_OTHER; self.rows] };
-        let dim = dim_fg().is_some();
         // unchanged cells between two runs cost less to rewrite than a
         // cursor move plus a fresh SGR, so short gaps join the run
         const GAP: usize = 3;
@@ -1671,14 +1509,9 @@ impl Screen {
             // body rows mix label, token and text codes, so only never-painted cells count there
             let late = block != 0 && self.grid[r].iter()
                 .any(|c| c.ch != ' ' && if block == BOTTOM_TEXT { c.shown == 0 } else { c.shown != block });
-            // a paragraph's mark can arrive, or go, after its rows are drawn
-            let late = late || self.cols > 0 && (marks[r] == ROW_MARK) != (self.grid[r][0].shown == MARK);
-            // likewise its dimming: a trigger word brightens the rows above it
-            let late = late || dim && block == 0 && self.grid[r].iter()
-                .any(|c| c.ch != ' ' && (c.shown == DIM) != (marks[r] == ROW_PROSE));
             if !self.dirty[r] && !late { continue; }
             self.dirty[r] = false;
-            self.desired_row(r, block, marks[r], &mut desired, &mut text, &mut cell_of, &mut code);
+            self.desired_row(r, block, &mut desired, &mut text, &mut cell_of, &mut code);
             let stale = |c: usize, row: &[Cell]| desired[c] != row[c].shown || row[c].cont;
             let mut c = 0;
             while c < self.cols {
@@ -1697,7 +1530,7 @@ impl Screen {
                             seg.push_str(&cell.attr.paint(desired[c]));
                             last_attr = Some((cell.attr.clone(), desired[c]));
                         }
-                        seg.push(if desired[c] == MARK && cell.ch == ' ' { MARK_GLYPH } else { cell.ch });
+                        seg.push(cell.ch);
                         if let Some(z) = &cell.zw { seg.push_str(z); }
                     }
                     self.grid[r][c].shown = desired[c];
@@ -1725,9 +1558,8 @@ impl Screen {
         let mut desired: Vec<u8> = Vec::new();
         let last_row = (0..self.rows).rev().find(|&r| self.grid[r].iter().any(|c| c.ch != ' ')).map_or(0, |r| r + 1);
         let blocks = self.block_rows(bottom().is_some());
-        let marks = if self.marks_on { self.mark_rows(&blocks) } else { vec![ROW_OTHER; self.rows] };
         for (r, &block) in blocks.iter().enumerate().take(last_row) {
-            self.desired_row(r, block, marks[r], &mut desired, &mut text, &mut cell_of, &mut code);
+            self.desired_row(r, block, &mut desired, &mut text, &mut cell_of, &mut code);
             let end = self.grid[r].iter().rposition(|c| c.ch != ' ').map_or(0, |i| i + 1);
             let mut last: Option<(Rc<Attr>, u8)> = None;
             for c in 0..end {
@@ -1738,7 +1570,7 @@ impl Screen {
                     s.push_str(&cell.attr.paint(desired[c]));
                     last = Some((cell.attr.clone(), desired[c]));
                 }
-                s.push(if desired[c] == MARK && cell.ch == ' ' { MARK_GLYPH } else { cell.ch });
+                s.push(cell.ch);
                 if let Some(z) = &cell.zw { s.push_str(z); }
             }
             s.push_str("\x1b[0m\n");
@@ -2050,25 +1882,14 @@ Run git status to see changes, then:\r\n\
 \x1b[38;2;153;153;153m  ⎿  Done (3 tool uses · 12s)\x1b[39m\r\n\
 The build log is in target/release/build.log and the config in ~/.config/app.toml, see README.md.\r\n\
 See https://docs.rs/libc and the panic at src/main.rs:42 (and/or e.g. Node.js).\r\n\
+╭──────────────╮\r\n\
+│ > ask me     │\r\n\
+╰──────────────╯\r\n\
 Use \x1b[38;2;95;179;217mclaude --rc \"my-project\"\x1b[39m from the project dir.\r\n\
 Tagged. \x1b[38;2;177;185;249mv1.2.0\x1b[39m is on \x1b[38;2;177;185;249mmain\x1b[39m; push with \x1b[38;2;177;185;249mgit push --follow-tags\x1b[39m when ready.\r\n\
 Let me make sure the build passes, then go ahead with the next step; run \x1b[38;2;177;185;249mnpm test\x1b[39m after.\r\n\
 Plain prose with the word node in it, and cd ~/Documents/codes/packages.\r\n\
-⏺ Cargo builds happen in stages, and the linker step is where this one failed.\r\n\
-\r\n\
-\x20 You need to run xcode-select --install yourself, then cargo clean && cargo build.\r\n\
-\x20 Without the CLT update the link keeps failing.\r\n\
-\r\n\
-\x20 Historically Apple has renamed several libSystem symbols across SDK versions.\r\n\
-\r\n\
-\x20 - I did not verify this on Linux.\r\n\
-\x20 - The theme list is unchanged.\r\n\
-\r\n\
-\x20 Do you want the marker on by default?\r\n\
-\x1b[1m● streamed:\x1b[22m Ran git\r\n\
-╭──────────────╮\r\n\
-│ > ask me     │\r\n\
-╰──────────────╯\x1b[0m";
+\x1b[1m● streamed:\x1b[22m Ran git\x1b[0m";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2307,7 +2128,7 @@ mod tests {
     fn remapped_foreground_is_wanted_even_in_prose() {
         let mut sc = screen(1, 20, "\x1b[38;2;177;185;249mfoo\x1b[39m bar");
         let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
-        sc.desired_row(0, 0, ROW_OTHER, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(0, 0, &mut d, &mut t, &mut c, &mut k);
         assert_eq!(d[0], REMAP_BASE);
         assert_eq!(d[4], 0);
         assert_eq!(k[0..3], [CTX_CODE, CTX_CODE, CTX_CODE]);
@@ -2322,95 +2143,6 @@ mod tests {
         assert_eq!(sc.block_rows(false), [P, 0, 0]);
         let sc = screen(5, 40, "⏺ Private note: x\r\n\r\n  Private\r\n\r\n⏺ Privateer ships");
         assert_eq!(sc.block_rows(false), [P, 0, P, 0, 0]);
-    }
-
-    #[test]
-    fn attention_is_a_question_an_instruction_or_a_flagged_phrase() {
-        for yes in [
-            "Do you want the marker on by default?",
-            "You need to run xcode-select --install yourself.",
-            "Run cargo clean && cargo build after that.",
-            "Note: a custom linker in .cargo/config.toml shadows this.",
-            "I did not verify this on Linux.",
-            "Without the CLT update the link keeps failing.",
-            "This is destructive; back up first.",
-            "Your call: keep the old theme or drop it.",
-            "  - Restart the server when it finishes.",
-            "It’s up to you whether to keep it.",
-        ] { assert!(needs_attention(yes), "{yes:?}"); }
-        for no in [
-            "Cargo builds happen in stages, and the linker step is where this one failed to link before.",
-            "Historically Apple has renamed several libSystem symbols across SDK versions.",
-            "The theme list is unchanged.",
-            "Ran the suite again and it passed.",
-            "An asterisk marks a brisk runner.",
-            "Let me make sure the build passes, then go ahead with the next step.",
-            "The build log is in target/release/build.log.",
-        ] { assert!(!needs_attention(no), "{no:?}"); }
-        assert!(!needs_attention("Runs on every chunk."), "opener must be a whole word");
-    }
-
-    #[test]
-    fn marks_follow_paragraphs_of_prose_only() {
-        let sc = screen(14, 60, "⏺ Done. You need to restart\r\n  the server now.\r\n\r\n  Plain narration here,\r\n  nothing to do.\r\n⏺ Bash(you must not run this)\r\n\x1b[38;2;153;153;153m  ⎿  you must see this output\x1b[39m\r\n  - Run cargo build\r\n  - the theme list is unchanged\r\n\r\n⏺ Privately, you must\r\n\r\n│ > you need ?  │\r\n  Is that ok?");
-        let blocks = sc.block_rows(false);
-        let m = sc.mark_rows(&blocks);
-        let (o, p, k) = (ROW_OTHER, ROW_PROSE, ROW_MARK);
-        let want = [k, k, o, p, p, o, o, k, p, o, o, o, o, o]; // the box row makes the tail input area
-        assert_eq!(m, want, "{m:?}");
-        let sc = screen(2, 40, "\x1b[38;2;95;179;217m  you must run this\x1b[39m\r\n  you must run this");
-        assert_eq!(sc.mark_rows(&[0, 0]), [ROW_OTHER, ROW_MARK], "a fully coloured row is code, not prose");
-        // what you type in the input box wraps under the `>` row; it and the
-        // hint rows below are never prose, while an earlier `>` echo above is
-        let sc = screen(8, 30, "> earlier question\r\n\r\n  Plain narration here.\r\n──────────────\r\n> you need to see this\r\n  wrapped input text\r\n──────────────\r\n  ? for shortcuts");
-        let (o, p) = (ROW_OTHER, ROW_PROSE);
-        assert_eq!(sc.mark_rows(&[0; 8]), [o, o, p, o, o, o, o, o]);
-    }
-
-    #[test]
-    fn mark_paints_column_zero_and_draws_the_glyph_on_a_blank() {
-        let mut sc = screen(4, 40, "⏺ You must restart\r\n  the server.\r\n\r\n  Nothing else.");
-        sc.marks_on = true;
-        let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
-        sc.desired_row(1, 0, ROW_MARK, &mut d, &mut t, &mut c, &mut k);
-        assert_eq!((d[0], d[1], d[2]), (MARK, 0, 0));
-        let s = sc.render_inline();
-        let rows: Vec<&str> = s.lines().collect();
-        assert!(rows[0].contains('⏺') && !rows[0].contains(MARK_GLYPH), "bullet is recoloured, not replaced: {:?}", rows[0]);
-        assert!(rows[1].contains(MARK_GLYPH), "{:?}", rows[1]);
-        assert!(!rows[3].contains(MARK_GLYPH), "{:?}", rows[3]);
-        // repaint emits the glyph once, then again only after the cell is redrawn
-        let mut out = Vec::new();
-        sc.dirty = vec![true; 4];
-        sc.repaint(&mut out);
-        let first = String::from_utf8(out.clone()).unwrap();
-        assert_eq!(first.matches(MARK_GLYPH).count(), 1, "{first:?}");
-        out.clear();
-        sc.repaint(&mut out);
-        assert!(out.is_empty(), "clean rows stay quiet: {:?}", String::from_utf8_lossy(&out));
-        // the paragraph loses its mark when its rows part: the glyph is erased
-        sc.feed(b"\x1b[2;1H\x1b[2K  the server.");
-        sc.feed(b"\x1b[1;1H\x1b[2K\xe2\x8f\xba Fine.");
-        out.clear();
-        sc.repaint(&mut out);
-        let third = String::from_utf8(out).unwrap();
-        assert!(!third.contains(MARK_GLYPH), "{third:?}");
-    }
-
-    #[test]
-    fn mark_pass_costs_microseconds() {
-        let mut body = String::new();
-        for i in 0..40 {
-            body.push_str(if i % 5 == 0 { "\r\n" } else if i % 5 == 1 { "⏺ You need to check this row, then run the build again and tell me what you see.\r\n" }
-                          else { "  Historically Apple has renamed several libSystem symbols across SDK versions here.\r\n" });
-        }
-        let sc = screen(40, 100, &body);
-        let t = std::time::Instant::now();
-        let n = 1000;
-        for _ in 0..n { let b = sc.block_rows(true); std::hint::black_box(sc.mark_rows(&b)); }
-        let per = t.elapsed() / n;
-        eprintln!("mark pass over a 40x100 screen: {per:?}");
-        assert!(per < std::time::Duration::from_millis(2), "{per:?}");
     }
 
     #[test]
@@ -2445,7 +2177,7 @@ mod tests {
         assert_eq!(parse_bottom("head=zz,bogus=112233"), Bottom::default());
         let mut sc = screen(3, 40, "\r\n⏺ Bottom line\r\n  - Fix: run \x1b[38;2;177;185;249mnpm\x1b[39m now");
         let (mut d, mut t, mut c, mut k) = (Vec::new(), String::new(), Vec::new(), Vec::new());
-        sc.desired_row(2, BOTTOM_TEXT, ROW_OTHER, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(2, BOTTOM_TEXT, &mut d, &mut t, &mut c, &mut k);
         assert_eq!(d[4..8], [BOTTOM_FIX; 4], "the label: {d:?}");
         assert_eq!((d[0], d[2], d[17]), (BOTTOM_TEXT, BOTTOM_TEXT, BOTTOM_TEXT), "plain text: {d:?}");
         assert!(d[13] != 0 && d[13] != BOTTOM_TEXT, "inline code keeps its colour: {d:?}");
@@ -2501,7 +2233,7 @@ mod tests {
         let (mut out, mut d, mut t, mut c, mut k) = (Vec::new(), Vec::new(), String::new(), Vec::new(), Vec::new());
         sc.repaint(&mut out);
         assert!(out.is_empty(), "painted once");
-        sc.desired_row(2, PRIVATE, ROW_OTHER, &mut d, &mut t, &mut c, &mut k);
+        sc.desired_row(2, PRIVATE, &mut d, &mut t, &mut c, &mut k);
         assert_eq!((d[0], d[11], d[12]), (PRIVATE, PRIVATE, 0));
     }
 
