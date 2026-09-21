@@ -49,11 +49,13 @@ That's it. There's nothing to configure.
 | `CLAUDE_HL_PRIVATE=435872` | One colour for Claude's private notes, instead of half the text colour |
 | `CLAUDE_HL_BOTTOM_LINE=head=5eead4,…` | Colour a `Bottom line` summary block. The slots are `head`, `verified`, `issue`, `fix` and `text`, as in `head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb`: the heading and each `Verified:`, `Issue:` and `Fix:` label in bold, and the plain text under them. Leave a slot out to keep that part as drawn; one bare `rrggbb` colours the heading and all labels. Off by default |
 | `CLAUDE_HL_MARK=1` | Draw a `▎` in the left gutter beside each paragraph of Claude's prose that asks something of you: a question, an instruction, a risk, or a thing it did not do. `1` uses the theme's warn colour; `rrggbb` picks one. Off by default |
-| `CLAUDE_HL_DIM=1` | Draw the prose paragraphs that get no mark at half brightness, so the marked ones stand out. List items are never dimmed: a list of findings or steps is the point of a reply. `1` halves each colour; `rrggbb` uses one flat colour. Needs `CLAUDE_HL_FG` inside tmux, like private notes. Off by default |
+| `CLAUDE_HL_DIM=1` | Draw the paragraphs Jev judges skippable at half brightness, so the rest stands out. Needs `TYPESAFE_API_KEY`; without it nothing dims. `1` halves each colour; `rrggbb` uses one flat colour. Needs `CLAUDE_HL_FG` inside tmux, like private notes. Off by default |
+| `CLAUDE_HL_DIM_ABOVE=0.9` | How sure Jev must be before a paragraph dims, from 0 to 1. Default 0.9 |
 | `CLAUDE_HL_FG=94a4b6` | Your terminal's text colour, so private notes can be drawn at half of it. Only needed where the terminal won't report it, such as inside tmux |
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
 | `CLAUDE_HL_DUMP=/tmp/hl.bin` | Append the raw PTY stream to a file, for bug reports |
+| `CLAUDE_HL_JEV_LOG=/tmp/jev.log` | Append each Jev request and reply to a file, to see why a paragraph did or did not dim |
 
 `claude-hl --selftest` prints a sample so you can check colours without starting
 Claude. `claude-hl --themes` prints that sample once per theme, so you can pick
@@ -92,11 +94,23 @@ Commands, paths and inline code inside keep their usual colours.
 
 With `CLAUDE_HL_MARK` set, a `▎` appears beside each paragraph of a reply that
 asks something of you: a question, an instruction, a risk, or something Claude
-did not do. `CLAUDE_HL_DIM` draws the other paragraphs at half brightness so the
-marked ones stand out. Only running prose dims: list items, code, tool calls and
-the input box are never touched.
+did not do. Those are matters of wording, so a small table of phrases decides
+them in microseconds.
 
-Those two need Claude's text as written, not as it wrapped on screen, so with
+`CLAUDE_HL_DIM` is different. Whether a paragraph is skippable is a judgement,
+not a wording, and rules got it wrong: a reply that answered a question with no
+ask in it dimmed from top to bottom. So dimming is Jev's call alone. When a reply
+finishes, claude-hl sends the prompt and the plain paragraphs to TypeSafe's
+[Jev](https://typesafe.ai) in one call and asks, per paragraph, whether a reader
+can skip it. About a second later the ones it is at least 90% sure about dim,
+typically a lead-in such as "Two ways to fix it:" or a closing offer of help.
+Everything else stays bright. Asks, list items, code, headings and anything
+Claude was asked to write are never sent and never dim. It needs
+`TYPESAFE_API_KEY` in the environment and `curl` on the path; without a key
+nothing dims. Claude's replies leave your machine for that call, so leave
+`CLAUDE_HL_DIM` unset where that matters.
+
+Marks and dimming need Claude's text as written, not as it wrapped on screen, so with
 either set claude-hl starts Claude with a session-only plugin. Its
 `MessageDisplay` hook is `claude-hl --hook`: Claude Code runs it with each
 batch of lines just before drawing them, and the hook relays the batch to the
