@@ -14,7 +14,7 @@
 //!                                        # (1 for the theme's warn colour, or rrggbb; default: off)
 //!   CLAUDE_HL_DIM=1 claude-hl            # paragraphs Jev judges skippable at half brightness; needs
 //!                                        # TYPESAFE_API_KEY (1 for half of each colour, or rrggbb; default: off)
-//!   CLAUDE_HL_DIM_ABOVE=0.9 claude-hl    # how sure Jev must be before a paragraph dims (default: 0.9)
+//!   CLAUDE_HL_DIM_ABOVE=0.85 claude-hl   # how sure Jev must be before a paragraph dims (default: 0.85)
 //!   CLAUDE_HL_FG=94a4b6 claude-hl        # terminal text colour, for half-bright private notes (tmux)
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
 //!   CLAUDE_HL_JEV_LOG=/path claude-hl    # append each Jev request and reply to a file (debug)
@@ -2106,11 +2106,13 @@ instruction, a caveat, a limit, or a question for the reader.";
 
 /// `CLAUDE_HL_DIM_ABOVE`: a paragraph dims only when Jev puts its chance of
 /// being skippable at or above this. Wrongly dimming substance costs more
-/// than leaving filler bright, so the default is high.
+/// than leaving filler bright, so the default leans high. It is 0.85, not
+/// 0.9: two identical calls on one borderline paragraph came back 0.74 and
+/// 0.83, so a tenth of slack sits between any threshold and a repeat run.
 fn dim_above() -> f64 {
     static A: OnceLock<f64> = OnceLock::new();
     *A.get_or_init(|| std::env::var("CLAUDE_HL_DIM_ABOVE").ok().and_then(|v| v.trim().parse().ok())
-        .filter(|p: &f64| (0.0..=1.0).contains(p)).unwrap_or(0.9))
+        .filter(|p: &f64| (0.0..=1.0).contains(p)).unwrap_or(0.85))
 }
 
 /// `s` as a JSON string literal.

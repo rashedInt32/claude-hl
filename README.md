@@ -50,7 +50,7 @@ That's it. There's nothing to configure.
 | `CLAUDE_HL_BOTTOM_LINE=head=5eead4,…` | Colour a `Bottom line` summary block. The slots are `head`, `verified`, `issue`, `fix` and `text`, as in `head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb`: the heading and each `Verified:`, `Issue:` and `Fix:` label in bold, and the plain text under them. Leave a slot out to keep that part as drawn; one bare `rrggbb` colours the heading and all labels. Off by default |
 | `CLAUDE_HL_MARK=1` | Draw a `▎` in the left gutter beside each paragraph of Claude's prose that asks something of you: a question, an instruction, a risk, or a thing it did not do. `1` uses the theme's warn colour; `rrggbb` picks one. Off by default |
 | `CLAUDE_HL_DIM=1` | Draw the paragraphs Jev judges skippable at half brightness, so the rest stands out. Needs `TYPESAFE_API_KEY`; without it nothing dims. `1` halves each colour; `rrggbb` uses one flat colour. Needs `CLAUDE_HL_FG` inside tmux, like private notes. Off by default |
-| `CLAUDE_HL_DIM_ABOVE=0.9` | How sure Jev must be before a paragraph dims, from 0 to 1. Default 0.9 |
+| `CLAUDE_HL_DIM_ABOVE=0.85` | How sure Jev must be before a paragraph dims, from 0 to 1. Default 0.85. Lower it to dim more |
 | `CLAUDE_HL_FG=94a4b6` | Your terminal's text colour, so private notes can be drawn at half of it. Only needed where the terminal won't report it, such as inside tmux |
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
@@ -102,7 +102,7 @@ not a wording, and rules got it wrong: a reply that answered a question with no
 ask in it dimmed from top to bottom. So dimming is Jev's call alone. When a reply
 finishes, claude-hl sends the prompt and the plain paragraphs to TypeSafe's
 [Jev](https://typesafe.ai) in one call and asks, per paragraph, whether a reader
-can skip it. About a second later the ones it is at least 90% sure about dim,
+can skip it. About a second later the ones it is at least 85% sure about dim,
 typically a lead-in such as "Two ways to fix it:" or a closing offer of help.
 Everything else stays bright. Asks, list items, code, headings and anything
 Claude was asked to write are never sent and never dim. It needs
