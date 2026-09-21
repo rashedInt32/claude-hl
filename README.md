@@ -49,7 +49,7 @@ That's it. There's nothing to configure.
 | `CLAUDE_HL_PRIVATE=435872` | One colour for Claude's private notes, instead of half the text colour |
 | `CLAUDE_HL_BOTTOM_LINE=head=5eead4,verified=bef264,issue=ff9e8a,fix=f0abfc,text=d6deeb` | Colour a `Bottom line` summary block: the heading and each `Verified:`, `Issue:` and `Fix:` label in bold, and the plain text under them. Leave a slot out to keep that part as drawn; one bare `rrggbb` colours the heading and all labels. Off by default |
 | `CLAUDE_HL_MARK=1` | Draw a `▎` in the left gutter beside each paragraph of Claude's prose that asks something of you: a question, an instruction, a risk, or a thing it did not do. `1` uses the theme's warn colour; `rrggbb` picks one. Off by default |
-| `CLAUDE_HL_DIM=1` | Draw the prose paragraphs that get no mark at half brightness, so the marked ones stand out. `1` halves each colour; `rrggbb` uses one flat colour. Needs `CLAUDE_HL_FG` inside tmux, like private notes. Off by default |
+| `CLAUDE_HL_DIM=1` | Draw the prose paragraphs that get no mark at half brightness, so the marked ones stand out. List items are never dimmed: a list of findings or steps is the point of a reply. `1` halves each colour; `rrggbb` uses one flat colour. Needs `CLAUDE_HL_FG` inside tmux, like private notes. Off by default |
 | `CLAUDE_HL_FG=94a4b6` | Your terminal's text colour, so private notes can be drawn at half of it. Only needed where the terminal won't report it, such as inside tmux |
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
@@ -93,7 +93,8 @@ Commands, paths and inline code inside keep their usual colours.
 With `CLAUDE_HL_MARK` set, a `▎` appears beside each paragraph of a reply that
 asks something of you: a question, an instruction, a risk, or something Claude
 did not do. `CLAUDE_HL_DIM` draws the other paragraphs at half brightness so the
-marked ones stand out. Tool calls, code and the input box are never touched.
+marked ones stand out. Only running prose dims: list items, code, tool calls and
+the input box are never touched.
 
 Those two need Claude's text as written, not as it wrapped on screen, so with
 either set claude-hl starts Claude with a session-only plugin. Its

@@ -297,13 +297,15 @@ fn list_item(t: &str) -> bool {
 /// as `ROW_KEEP`; `keep` carries that on. When the prompt itself asked for
 /// writing, the whole reply is the writing and every paragraph is kept: a
 /// question inside a drafted post asks nothing of the reader. Headings and
-/// rules are left as drawn. Otherwise `needs_attention()` decides.
+/// rules are left as drawn. Otherwise `needs_attention()` decides, and only
+/// running prose is ever dimmed: a list item is already a condensed point,
+/// a finding or a step, so one without an ask is kept bright.
 fn prose_label(text: &str, keep: &mut bool, writing: bool) -> u8 {
     let t = text.trim_start();
     if t.starts_with('#') || t.starts_with("---") || t.starts_with("***") { return ROW_OTHER; }
     if bold_label(t).is_some_and(|label| DOC_LABELS.contains(&label.as_str())) { *keep = true; }
     if *keep || writing { return ROW_KEEP; }
-    if needs_attention(t) { ROW_MARK } else { ROW_PROSE }
+    if needs_attention(t) { ROW_MARK } else if list_item(t) { ROW_KEEP } else { ROW_PROSE }
 }
 
 /// Where a paragraph split stands: inside a fenced code block, and inside
@@ -3032,8 +3034,12 @@ https://github.com/rashedInt32/jev-reach\n";
 - I did not verify this on Linux.\n- The theme list is unchanged.\n\n**Files changed:** two.\n\nDo you want the marker on?\n";
         let got = classify(md, false, Mode::default());
         let labels: Vec<u8> = got.iter().map(|p| p.label).collect();
-        assert_eq!(labels, [o, p, ROW_MARK, ROW_MARK, p, p, ROW_MARK], "{got:?}");
+        assert_eq!(labels, [o, p, ROW_MARK, ROW_MARK, k, p, ROW_MARK], "{got:?}");
         assert_eq!(got.len(), 7, "list items are their own paragraphs");
+        // a list of findings has no ask in it, yet it is the point of the reply: never dimmed
+        let findings = "Three problems:\n\n- the parser drops the last line\n- `spans()` paints the word node\n3. the theme list has a typo\n\nThat is all.\n";
+        let labels: Vec<u8> = classify(findings, false, Mode::default()).iter().map(|p| p.label).collect();
+        assert_eq!(labels, [p, k, k, k, p]);
         // an unclosed fence is code so far, and a split resumes from before it
         let got = classify("Text.\n\n```\nlet x = 1;\n", false, Mode::default());
         assert_eq!((got[1].label, got[1].at, got[1].mode.fence), (o, 7, false));
@@ -3115,7 +3121,8 @@ https://github.com/rashedInt32/jev-reach\n";
         let blocks = sc.block_rows(false);
         let m = sc.mark_rows(&blocks);
         let (o, p, k) = (ROW_OTHER, ROW_PROSE, ROW_MARK);
-        let want = [k, k, o, p, p, o, o, k, p, o, o, o, o, o]; // the box row makes the tail input area
+        // the box row makes the tail input area; the second list item is kept, not dimmed
+        let want = [k, k, o, p, p, o, o, k, ROW_KEEP, o, o, o, o, o];
         assert_eq!(m, want, "{m:?}");
         // a paragraph the hook never saw is left as drawn, whatever it says
         let sc = screen(2, 40, "  You must run this\r\n  right now.");
