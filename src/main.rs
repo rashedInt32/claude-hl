@@ -14,7 +14,6 @@
 //!                                        # (1 for the theme's warn colour, or rrggbb; default: off)
 //!   CLAUDE_HL_FG=94a4b6 claude-hl        # terminal text colour, for half-bright private notes (tmux)
 //!   CLAUDE_HL_DUMP=/path claude-hl       # also append the raw PTY stream to a file (debug)
-//!   CLAUDE_HL_PAINT=0 claude-hl          # paint nothing: a pure passthrough (pictures, below)
 //!   claude-hl --selftest                 # print sample highlighted text
 //!   claude-hl --themes                   # preview every theme
 //!   claude-hl --version                  # wrapper version (everything else passes through)
@@ -34,15 +33,6 @@
 //! socket in a private temp dir, and the wrapper labels every paragraph from
 //! the markdown and files it under its first letters. When the rows appear,
 //! they are matched by the same letters and painted in the same write.
-//!
-//! Pictures inside tmux: Claude Code draws a picture as a kitty graphics
-//! code (`ESC _ G ... ESC \`) plus placeholder cells, but inside tmux it
-//! writes the code unwrapped, so tmux drops it and the cells stay blank.
-//! With `$TMUX` set and painting off, the wrapper wraps each such code in
-//! tmux's passthrough (`ESC P tmux ; ... ESC \`, inner ESCs doubled); tmux
-//! hands it to the outer terminal and keeps the cells as text. Claude needs
-//! `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` to draw at all inside tmux, and
-//! tmux needs `allow-passthrough` on.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
@@ -2190,63 +2180,6 @@ impl Drop for Hooks {
 
 // ---- PTY plumbing ----------------------------------------------------------
 
-/// kitty graphics codes wrapped for tmux's passthrough; every other byte
-/// passes untouched. A code split across reads is held until its end comes.
-struct Passthrough { on: bool, held: Vec<u8> }
-
-/// The most a held code may grow before it is let through as it is: Claude
-/// sends a picture in 4096-byte chunks, so a code this long is not one.
-const HELD_MAX: usize = 1 << 20;
-
-impl Passthrough {
-    fn feed(&mut self, data: &[u8], out: &mut Vec<u8>) {
-        if !self.on { out.extend_from_slice(data); return; }
-        let mut buf = std::mem::take(&mut self.held);
-        buf.extend_from_slice(data);
-        let (mut i, mut copied) = (0, 0);
-        while i < buf.len() {
-            if buf[i] != 0x1b { i += 1; continue; }
-            let rest = &buf[i + 1..];
-            // `ESC _ G` opens a picture code; a shorter tail that could still
-            // become one is held for the next read
-            if rest.len() < 2 {
-                if b"_G".starts_with(rest) { break; }
-                i += 1;
-                continue;
-            }
-            if &rest[..2] != b"_G" { i += 1; continue; }
-            match buf[i + 3..].windows(2).position(|w| w == b"\x1b\\") {
-                Some(at) => {
-                    let end = i + 3 + at + 2;
-                    out.extend_from_slice(&buf[copied..i]);
-                    tmux_wrap(&buf[i..end], out);
-                    i = end;
-                    copied = end;
-                }
-                None => break,
-            }
-        }
-        if i < buf.len() && buf.len() - i <= HELD_MAX {
-            out.extend_from_slice(&buf[copied..i]);
-            self.held = buf[i..].to_vec();
-        } else {
-            out.extend_from_slice(&buf[copied..]);
-        }
-    }
-
-    /// What is held when the child is gone, as it came.
-    fn flush(&mut self, out: &mut Vec<u8>) { out.append(&mut self.held); }
-}
-
-fn tmux_wrap(code: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(b"\x1bPtmux;");
-    for &b in code {
-        if b == 0x1b { out.push(0x1b); }
-        out.push(b);
-    }
-    out.extend_from_slice(b"\x1b\\");
-}
-
 static WINCH: AtomicBool = AtomicBool::new(false);
 /// SIGTERM/SIGHUP received: leave the loop, restore the terminal, pass it on
 static QUIT: AtomicI32 = AtomicI32::new(0);
@@ -2388,13 +2321,6 @@ fn run(argv: &[String]) -> i32 {
         // no terminal to measure or to draw on: pure passthrough
         screen.enabled = false;
     }
-    // CLAUDE_HL_PAINT=0: paint nothing (a mod draws Claude's output now);
-    // the wrapper is then a passthrough that only fixes pictures in tmux
-    if std::env::var("CLAUDE_HL_PAINT").map_or(false, |v| v == "0") { screen.enabled = false; }
-    let mut pass = Passthrough {
-        on: !screen.enabled && std::env::var("TMUX").map_or(false, |v| !v.is_empty()),
-        held: Vec::new(),
-    };
     // raw mode before spawning so the DSR reply below never echoes
     if isatty && out_tty {
         unsafe {
@@ -2447,7 +2373,7 @@ fn run(argv: &[String]) -> i32 {
     // query_cursor strips the reply from stdin before it can reach the
     // child; the child's output waits unread in the pty buffer meanwhile.
     let mut leftover = Vec::new();
-    if isatty && out_tty && screen.enabled {
+    if isatty && out_tty {
         let (pos, rest) = query_cursor(stdin, stdout);
         match pos {
             Some((r, c)) => screen.set_cursor(r, c),
@@ -2500,23 +2426,18 @@ fn run(argv: &[String]) -> i32 {
             let data = &buf[..n as usize];
             if let Some(f) = dump.as_mut() { let _ = f.write_all(data); }
             out.clear();
-            if !screen.enabled {
-                // painting off: bytes as they came, picture codes wrapped in tmux
-                pass.feed(data, &mut out);
-            } else {
-                // paint before the end of a synchronized-update block so the
-                // terminal shows text and colour in the same frame
-                const SYNC_END: &[u8] = b"\x1b[?2026l";
-                let split = data.windows(SYNC_END.len()).rposition(|w| w == SYNC_END);
-                let (head, tail) = match split { Some(i) => (&data[..i], &data[i..]), None => (data, &data[data.len()..]) };
-                out.extend_from_slice(head);
-                screen.feed(head);
+            // paint before the end of a synchronized-update block so the
+            // terminal shows text and colour in the same frame
+            const SYNC_END: &[u8] = b"\x1b[?2026l";
+            let split = data.windows(SYNC_END.len()).rposition(|w| w == SYNC_END);
+            let (head, tail) = match split { Some(i) => (&data[..i], &data[i..]), None => (data, &data[data.len()..]) };
+            out.extend_from_slice(head);
+            screen.feed(head);
+            screen.repaint(&mut out);
+            if !tail.is_empty() {
+                out.extend_from_slice(tail);
+                screen.feed(tail);
                 screen.repaint(&mut out);
-                if !tail.is_empty() {
-                    out.extend_from_slice(tail);
-                    screen.feed(tail);
-                    screen.repaint(&mut out);
-                }
             }
             if !write_all(stdout, &out) { break; }
         }
@@ -2543,9 +2464,6 @@ fn run(argv: &[String]) -> i32 {
         }
     }
 
-    out.clear();
-    pass.flush(&mut out);
-    if !out.is_empty() { write_all(stdout, &out); }
     if let Some(t) = old { unsafe { libc::tcsetattr(stdin, libc::TCSADRAIN, &t); } }
     reap(pid, master)
 }
@@ -2646,47 +2564,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pass_all(on: bool, pieces: &[&[u8]]) -> Vec<u8> {
-        let mut p = Passthrough { on, held: Vec::new() };
-        let mut out = Vec::new();
-        for piece in pieces { p.feed(piece, &mut out); }
-        p.flush(&mut out);
-        out
-    }
-
-    #[test]
-    fn passthrough_wraps_a_picture_code_for_tmux() {
-        let out = pass_all(true, &[b"ab\x1b_Ga=T,q=2;QUFB\x1b\\cd"]);
-        assert_eq!(out, b"ab\x1bPtmux;\x1b\x1b_Ga=T,q=2;QUFB\x1b\x1b\\\x1b\\cd".to_vec());
-    }
-
-    #[test]
-    fn passthrough_holds_a_code_split_across_reads() {
-        let whole = pass_all(true, &[b"x\x1b_Gm=1;AAAA\x1b\\y"]);
-        for cut in 1..b"x\x1b_Gm=1;AAAA\x1b\\y".len() {
-            let all = b"x\x1b_Gm=1;AAAA\x1b\\y";
-            assert_eq!(pass_all(true, &[&all[..cut], &all[cut..]]), whole, "cut at {cut}");
-        }
-    }
-
-    #[test]
-    fn passthrough_leaves_everything_else_alone() {
-        // colours, a cursor move, another APC, a lone ESC at the end
-        let text: &[u8] = b"\x1b[38;2;1;2;3mhi\x1b[2C\x1b_Xother\x1b\\\x1b";
-        assert_eq!(pass_all(true, &[text]), text.to_vec());
-        assert_eq!(pass_all(true, &[b"a\x1b", b"[0m"]), b"a\x1b[0m".to_vec());
-        // off (outside tmux): bytes as they came, picture codes included
-        let pic: &[u8] = b"\x1b_Ga=T;QQ\x1b\\";
-        assert_eq!(pass_all(false, &[pic]), pic.to_vec());
-    }
-
-    #[test]
-    fn passthrough_lets_an_endless_code_go_as_it_came() {
-        let mut long = b"\x1b_G".to_vec();
-        long.extend(std::iter::repeat(b'A').take(HELD_MAX + 10));
-        assert_eq!(pass_all(true, &[&long]), long);
-    }
 
     /// `[tok:Kind]` markup of what `spans` would paint, e.g. `[git:Cmd] [status:Sub]`.
     fn paint_with(line: &str, code: &[u8]) -> String {
