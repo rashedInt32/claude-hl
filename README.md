@@ -53,6 +53,7 @@ That's it. There's nothing to configure.
 | `CLAUDE_HL_CMD=codex` | Wrap a different program |
 | `CLAUDE_HL_REMAP=b1b9f9=a99cff` | Recolour any exact foreground the app draws. Comma-separate pairs; empty disables |
 | `CLAUDE_HL_DUMP=/tmp/hl.bin` | Append the raw PTY stream to a file, for bug reports |
+| `CLAUDE_HL_PAINT=0` | Paint nothing: a plain passthrough. Use it when something else (a Claude Code mod) draws the output. Inside tmux it still fixes pictures, below |
 
 `claude-hl --selftest` prints a sample so you can check colours without starting
 Claude. `claude-hl --themes` prints that sample once per theme, so you can pick
@@ -179,6 +180,25 @@ Beyond commands, a second pass paints what the first left alone:
 
 Repaints are cheap on the terminal side: tokens a few cells apart share one
 cursor move and one SGR, and attributes are emitted as a single sequence.
+
+## Pictures inside tmux
+
+Claude Code draws a picture as a kitty graphics code plus placeholder cells.
+Inside tmux it turns pictures off, and forced on with
+`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1` it writes the code unwrapped, so tmux
+drops it and the cells stay blank. With `$TMUX` set and `CLAUDE_HL_PAINT=0`,
+claude-hl wraps each kitty graphics code in tmux's passthrough and leaves
+every other byte alone; tmux hands the picture to Ghostty or kitty and keeps
+the placeholder cells as text, so the picture scrolls with the transcript.
+
+```sh
+# tmux.conf: set -g allow-passthrough all
+CLAUDE_HL_PAINT=0 CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1 claude-hl
+```
+
+`all` rather than `on` lets a picture through while its pane is hidden, so
+one Claude sends from another window is there when you come back. The
+override is undocumented Claude Code behaviour (seen in 2.1.296) and may go.
 
 ## Limits
 
